@@ -32,6 +32,5 @@ for text in items:
     label = tokenizer.decode(out[0], skip_special_tokens=True).strip()
     results[text] = label
 
-# 5) Print
 for txt, lbl in results.items():
     print(f"{lbl}  \t| {txt}")
