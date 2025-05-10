@@ -4,6 +4,13 @@ from datasets import load_dataset
 import torch
 import random
 import pandas as pd
+import re
+
+def extract_label(s: str):
+    """Return the first '0' or '1' found in s, or None if not found."""
+    m = re.search(r"\b([01])\b", s)
+    return int(m.group(1)) if m else None
+
 
 # load model & tokenizer in 8-bit
 model_name = "CohereForAI/aya-101"
@@ -112,19 +119,38 @@ print(df.to_markdown(index=False))
 
 df = pd.DataFrame(results)
 
+df["pred_int"] = df["pred_label"].astype(str).apply(extract_label)
+
+
 summary = []
 for tmpl, group in df.groupby("template"):
-    trues = group["true_label"].astype(int)
-    preds = group["pred_label"].astype(int)
+    sub = group.dropna(subset=["pred_int"])
+    trues = sub["true_label"].astype(int)
+    preds = sub["pred_int"].astype(int)
+    n = len(sub)
+    if n == 0:
+        # no valid predictions to score
+        summary.append({
+            "template":   tmpl,
+            "n_evaluated": 0,
+            "accuracy":   "N/A",
+            "precision":  "N/A",
+            "recall":     "N/A",
+            "f1":         "N/A",
+        })
+        continue
+
     acc = accuracy_score(trues, preds)
-    prec, rec, f1, _ = precision_recall_fscore_support(trues, preds, average="binary", zero_division=0)
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        trues, preds, average="binary", zero_division=0
+    )
     summary.append({
-        "template": tmpl,
-        "n_samples": len(group),
-        "accuracy": f"{acc:.2f}",
-        "precision": f"{prec:.2f}",
-        "recall": f"{rec:.2f}",
-        "f1": f"{f1:.2f}",
+        "template":    tmpl,
+        "n_evaluated": n,
+        "accuracy":    f"{acc:.2f}",
+        "precision":   f"{prec:.2f}",
+        "recall":      f"{rec:.2f}",
+        "f1":          f"{f1:.2f}",
     })
 
 summary_df = pd.DataFrame(summary)
