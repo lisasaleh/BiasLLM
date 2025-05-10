@@ -2,7 +2,7 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 
 model_name = "CohereForAI/aya-101"
-tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, load_in_8bit = True, device_map="auto")
 model     = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True).to("cuda")
 
 template = """Je bent een expert op het gebied van bias, stereotypering en discriminatie.
