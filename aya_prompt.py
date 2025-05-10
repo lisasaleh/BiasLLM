@@ -2,8 +2,8 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 
 model_name = "CohereForAI/aya-101"
-tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=True)
-model     = AutoModelForSeq2SeqLM.from_pretrained(model_name, use_auth_token=True).to("cuda")
+tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+model     = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True).to("cuda")
 
 template = """Je bent een expert op het gebied van bias, stereotypering en discriminatie.
 Je taak is om zinnen te classificeren volgens de volgende definitie:
