@@ -1,10 +1,11 @@
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from datasets import load_dataset
 import torch
 import random
 import pandas as pd
 
-#Load model & tokenizer in 8-bit
+# load model & tokenizer in 8-bit
 model_name = "CohereForAI/aya-101"
 tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model = AutoModelForSeq2SeqLM.from_pretrained(
@@ -86,7 +87,8 @@ for tmpl_name, tmpl in templates.items():
         true_label = entry["label"]
         
         prompt = tmpl.format(item=text)
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True).to(model.device)
+        device = next(model.parameters()).device
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, padding=True).to(device)
         output = model.generate(**inputs, max_new_tokens=max_tokens[tmpl_name])
         pred = tokenizer.decode(output[0], skip_special_tokens=True).strip()
 
@@ -107,3 +109,23 @@ for tmpl_name, tmpl in templates.items():
 
 df = pd.DataFrame(results)
 print(df.to_markdown(index=False))
+
+df = pd.DataFrame(results)
+
+summary = []
+for tmpl, group in df.groupby("template"):
+    trues = group["true_label"].astype(int)
+    preds = group["pred_label"].astype(int)
+    acc = accuracy_score(trues, preds)
+    prec, rec, f1, _ = precision_recall_fscore_support(trues, preds, average="binary", zero_division=0)
+    summary.append({
+        "template": tmpl,
+        "n_samples": len(group),
+        "accuracy": f"{acc:.2f}",
+        "precision": f"{prec:.2f}",
+        "recall": f"{rec:.2f}",
+        "f1": f"{f1:.2f}",
+    })
+
+summary_df = pd.DataFrame(summary)
+print(summary_df.to_markdown(index=False))
