@@ -74,7 +74,7 @@ De zin die beoordeeld moet worden: “{item}”
 """
 }
 
-num_samples = 5
+num_samples = 50
 random.seed(42)
 
 max_tokens = {
