@@ -81,7 +81,7 @@ max_tokens = {
     "template_1": 5,
     "template_2": 5,
     "template_3": 5,
-    "template_4": 150,
+    "template_4": 300,
     "template_5": 5,
 }
 
@@ -99,19 +99,20 @@ for tmpl_name, tmpl in templates.items():
         output = model.generate(**inputs, max_new_tokens=max_tokens[tmpl_name])
         pred = tokenizer.decode(output[0], skip_special_tokens=True).strip()
 
-        if tmpl_name == "template_4":
-            # assume reasoning + "\n1"  or "\n0" at the end
-            *reasoning, pred_label = pred.rsplit(maxsplit=1)
-            reasoning = " ".join(reasoning)
+        m = re.search(r"([01])\s*$", pred)
+        if m:
+            pred_label = int(m.group(1))
+            reasoning  = pred[: m.start()].strip()
         else:
-            reasoning = None
-            pred_label = pred
+            pred_label = None
+            reasoning  = pred
         
         results.append({
             "template": tmpl_name,
             "text": text,
             "true_label": true_label,
             "pred_label": pred_label
+            "reasoning": reasoning
         })
 
 df = pd.DataFrame(results)
@@ -119,14 +120,11 @@ print(df.to_markdown(index=False))
 
 df = pd.DataFrame(results)
 
-df["pred_int"] = df["pred_label"].astype(str).apply(extract_label)
-
-
 summary = []
 for tmpl, group in df.groupby("template"):
-    sub = group.dropna(subset=["pred_int"])
+    sub = group.dropna(subset=["pred_label"])
     trues = sub["true_label"].astype(int)
-    preds = sub["pred_int"].astype(int)
+    preds = sub["pred_label"].astype(int)
     n = len(sub)
     if n == 0:
         # no valid predictions to score
@@ -155,3 +153,15 @@ for tmpl, group in df.groupby("template"):
 
 summary_df = pd.DataFrame(summary)
 print(summary_df.to_markdown(index=False))
+
+t4 = df[df["template"]=="template_4"]
+no_label = t4[t4["pred_int"].isna()]
+has_label = t4[t4["pred_int"].notna()]
+
+print("\n\n=== template_4: cases with NO valid label ===")
+for _, row in no_label.iterrows():
+    print(f"\nText: {row['text']}\nReasoning:\n{row['reasoning']}\n---")
+
+print("\n\n=== template_4: random 5 cases with a label ===")
+for _, row in has_label.sample(5, random_state=42).iterrows():
+    print(f"\nText: {row['text']}\nReasoning:\n{row['reasoning']}\nPredicted label: {row['pred_int']}\n---")
