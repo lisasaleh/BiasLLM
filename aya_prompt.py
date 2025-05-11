@@ -27,50 +27,82 @@ dataset = load_dataset(
 )
 
 templates = {
-    "template_1": """Je bent een expert op het gebied van bias, stereotypering en discriminatie.
+    "template_1": """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
 Je taak is om zinnen te classificeren volgens de volgende definitie:
 een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
 die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
 OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
-Geef de volgende zin een label, antwoord alleen met 0 of 1.
-Geef de zin het label 0 voor niet-biased en 1 voor biased.
+Rederneer stap-voor-stap waarom deze zin wel of neit bias bevat.
+Sluit je antwoordt altijd af met een label:
+0 voor niet-biased of 1 voor biased.
 De zin die beoordeeld moet worden: “{item}”
-""",
+"""
+    
+#     """Je bent een expert op het gebied van bias, stereotypering en discriminatie.
+# Je taak is om zinnen te classificeren volgens de volgende definitie:
+# een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
+# die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
+# OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
+# Geef de volgende zin een label, antwoord alleen met 0 of 1.
+# Geef de zin het label 0 voor niet-biased en 1 voor biased.
+# De zin die beoordeeld moet worden: “{item}”
+# """,
     "template_2": """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
 Je taak is om zinnen te classificeren volgens de volgende definitie:
 een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
 die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
 OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
-Geef de volgende zin een label, antwoord alleen met 0 of 1.
-Geef de zin het label 0 voor niet-biased en 1 voor biased.
+Rederneer stap-voor-stap waarom deze zin wel of niet bias bevat.
+Sluit je antwoordt altijd af met het label, 0 (niet-biased) of 1 (biased).
 De zin die beoordeeld moet worden: “{item}”
-""",
-    "template_3": """Je bent een expert in Nederlandse juridische en parlementaire documenten.
+"""
+     
+#     """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
+# Je taak is om zinnen te classificeren volgens de volgende definitie:
+# een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
+# die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
+# OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
+# Geef de volgende zin een label, antwoord alleen met 0 of 1.
+# Geef de zin het label 0 voor niet-biased en 1 voor biased.
+# De zin die beoordeeld moet worden: “{item}”
+# """,
+    "template_3": """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
 Je taak is om zinnen te classificeren volgens de volgende definitie:
 een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
 die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
 OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
-Geef de volgende zin een label, antwoord alleen met 0 of 1.
-Geef de zin het label 0 voor niet-biased en 1 voor biased.
+Denk hardop en stap-voor stap.
+Sluit je antwoordt altijd af met het label, 0 (niet-biased) of 1 (biased).
 De zin die beoordeeld moet worden: “{item}”
-""",
+"""
+    
+#     """Je bent een expert in Nederlandse juridische en parlementaire documenten.
+# Je taak is om zinnen te classificeren volgens de volgende definitie:
+# een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
+# die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
+# OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
+# Geef de volgende zin een label, antwoord alleen met 0 of 1.
+# Geef de zin het label 0 voor niet-biased en 1 voor biased.
+# De zin die beoordeeld moet worden: “{item}”
+# """,
     "template_4": """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
 Je taak is om zinnen te classificeren volgens de volgende definitie:
 een zin bevat bias als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat,
 die impliciet of expliciet kunnen zijn, en die gaan over een af te bakenen groep personen,
 OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
-Denk na en schrijf je stap-voor-stap redenatie uit voordat je antwoort.
-Geef de volgende zin een label, 0 of 1.
-Geef de zin het label 0 voor niet-biased en 1 voor biased.
-De zin die beoordeeld moet worden: “{item}”
-""",
-    "template_5": """Een zin moet als wordt herkend als een zin met bias als het aan een van de volgende voorwaarden voldoet:
-1. De zin bevat een universeel ongepaste term, **OF**
-2a. De zin vertoont bias, zoals stereotypering, uitsluiting, machtsongelijkheid of vooroordeel—impliciet of expliciet **EN**
-2b. De bias is gericht op een specifieke groep personen.
-Geef de zin het label 0 voor niet-biased en 1 voor biased.
+Denk na en schrijf je stap-voor-stap redenatie uit.
+Sluit je antwoordt altijd af met het label, 0 (niet-biased) of 1 (biased).
 De zin die beoordeeld moet worden: “{item}”
 """
+#    "template_5": 
+    
+#     """Een zin moet als wordt herkend als een zin met bias als het aan een van de volgende voorwaarden voldoet:
+# 1. De zin bevat een universeel ongepaste term, **OF**
+# 2a. De zin vertoont bias, zoals stereotypering, uitsluiting, machtsongelijkheid of vooroordeel—impliciet of expliciet **EN**
+# 2b. De bias is gericht op een specifieke groep personen.
+# Geef de zin het label 0 voor niet-biased en 1 voor biased.
+# De zin die beoordeeld moet worden: “{item}”
+# """
 }
 
 num_samples = 50
