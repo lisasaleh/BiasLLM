@@ -36,7 +36,7 @@ Rederneer stap-voor-stap waarom deze zin wel of neit bias bevat.
 Sluit je antwoordt altijd af met een label:
 0 voor niet-biased of 1 voor biased.
 De zin die beoordeeld moet worden: “{item}”
-"""
+""",
     
 #     """Je bent een expert op het gebied van bias, stereotypering en discriminatie.
 # Je taak is om zinnen te classificeren volgens de volgende definitie:
@@ -55,7 +55,7 @@ OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
 Rederneer stap-voor-stap waarom deze zin wel of niet bias bevat.
 Sluit je antwoordt altijd af met het label, 0 (niet-biased) of 1 (biased).
 De zin die beoordeeld moet worden: “{item}”
-"""
+""",
      
 #     """Je bent een expert op het gebied van bias, stereotypering en discriminatie detectie.
 # Je taak is om zinnen te classificeren volgens de volgende definitie:
@@ -74,7 +74,7 @@ OF als een zin een woord bevat wat moet worden vermeden omdat het bias bevat.
 Denk hardop en stap-voor stap.
 Sluit je antwoordt altijd af met het label, 0 (niet-biased) of 1 (biased).
 De zin die beoordeeld moet worden: “{item}”
-"""
+""",
     
 #     """Je bent een expert in Nederlandse juridische en parlementaire documenten.
 # Je taak is om zinnen te classificeren volgens de volgende definitie:
