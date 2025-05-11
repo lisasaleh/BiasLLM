@@ -111,7 +111,7 @@ for tmpl_name, tmpl in templates.items():
             "template": tmpl_name,
             "text": text,
             "true_label": true_label,
-            "pred_label": pred_label
+            "pred_label": pred_label,
             "reasoning": reasoning
         })
 
