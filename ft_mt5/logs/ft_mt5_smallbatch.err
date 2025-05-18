@@ -1,26 +1,0 @@
-============================================================================================== 
-Warning! Mixing Conda and module environments may lead to corruption of the
-user environment. 
-We do not recommend users mixing those two environments unless absolutely
-necessary. Note that 
-SURF does not provide any support for Conda environment.
-For more information, please refer to our software policy page:
-https://servicedesk.surf.nl/wiki/display/WIKI/Software+policy+Snellius#SoftwarepolicySnellius-UseofAnacondaandMinicondaenvironmentsonSnellius 
-
-Remember that many packages have already been installed on the system and can
-be loaded using 
-the 'module load <package__name>' command. If you are uncertain if a package is
-already available 
-on the system, please use 'module avail' or 'module spider' to search for it.
-============================================================================================== 
-usage: conda [-h] [--no-plugins] [-V] COMMAND ...
-conda: error: argument COMMAND: invalid choice: 'activate' (choose from 'clean', 'compare', 'config', 'create', 'info', 'init', 'install', 'list', 'notices', 'package', 'remove', 'uninstall', 'rename', 'run', 'search', 'update', 'upgrade', 'build', 'convert', 'debug', 'develop', 'doctor', 'index', 'inspect', 'metapackage', 'render', 'skeleton', 'content-trust', 'repo', 'token', 'server', 'pack', 'verify', 'env')
-/home/scur1430/.local/lib/python3.11/site-packages/huggingface_hub/file_download.py:943: FutureWarning: `resume_download` is deprecated and will be removed in version 1.0.0. Downloads always resume when possible. If you want to force a new download, use `force_download=True`.
-  warnings.warn(
-Found cached dataset csv (/home/scur1430/.cache/huggingface/datasets/milenamileentje___csv/milenamileentje--Dutch-Government-Data-for-Bias-detection-cec432251380a943/0.0.0/6954658bab30a358235fa864b05cf819af0e179325c740e4bc853bcc7ec513e1)
-  0%|          | 0/3 [00:00<?, ?it/s]100%|██████████| 3/3 [00:00<00:00, 343.97it/s]
-Map:   0%|          | 0/782 [00:00<?, ? examples/s]Map:  24%|██▍       | 188/782 [00:00<00:00, 1857.96 examples/s]Map:  55%|█████▌    | 434/782 [00:00<00:00, 2202.89 examples/s]Map:  87%|████████▋ | 683/782 [00:00<00:00, 2329.00 examples/s]                                                               Map:   0%|          | 0/1421 [00:00<?, ? examples/s]Map:  18%|█▊        | 256/1421 [00:00<00:00, 2523.27 examples/s]Map:  44%|████▍     | 626/1421 [00:00<00:00, 2470.76 examples/s]Map:  62%|██████▏   | 884/1421 [00:00<00:00, 2509.61 examples/s]Map:  88%|████████▊ | 1249/1421 [00:00<00:00, 1934.14 examples/s]                                                                 Map:   0%|          | 0/713 [00:00<?, ? examples/s]Map:  35%|███▌      | 250/713 [00:00<00:00, 2479.42 examples/s]Map:  71%|███████▏  | 509/713 [00:00<00:00, 2537.91 examples/s]                                                               Traceback (most recent call last):
-  File "/gpfs/home2/scur1430/BiasLLM/ft_mt5/pretraining_mt5.py", line 129, in <module>
-    training_args = Seq2SeqTrainingArguments(
-                    ^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: Seq2SeqTrainingArguments.__init__() got an unexpected keyword argument 'eval_strategy'
