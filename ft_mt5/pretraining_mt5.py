@@ -158,9 +158,14 @@ if __name__ =="__main__":
     print("Starting training...")
     trainer.train()
     print("Training complete.")
-    trainer.save_model("mt5-base-finetuned")
-    print("Model saved.")
+    eval_metrics = trainer.evaluate()
+    best_f1 = eval_metrics["eval_f1_macro"]
+    print(f"Best validation F1: {best_f1:.4f}")
 
+    model_dir = f"mt5-base-finetuned-f1_{best_f1:.4f}"
+    trainer.save_model(model_dir)
+    print(f"Model saved to {model_dir}")
+    
     tokenized_test.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
     predictions = trainer.predict(tokenized_test)
