@@ -83,20 +83,28 @@ tokenizer = MT5Tokenizer.from_pretrained(model_name)
 model = MT5ForConditionalGeneration.from_pretrained(model_name)
 
 dataset = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")
+
+
 def preprocess(example, makeitwords=True):
     model_inputs = tokenizer(example['text'], truncation=True, padding="max_length", max_length=512)
-    with tokenizer.as_target_tokenizer():
-        if makeitwords:
-            if example["label"] == 0:
-                label = "niet-biased"
-                labels = tokenizer(label, truncation=True, padding="max_length", max_length=512)
-            elif example["label"] == 1: 
-                label = "biased"
-                labels = tokenizer(label, truncation=True, padding="max_length", max_length=512)
-        else:
-            labels = tokenizer(str(example["label"]), truncation=True, padding="max_length", max_length=512) 
-    model_inputs["labels"] = labels["input_ids"]
-    model_inputs["decoder_attention_mask"] = labels["attention_mask"]
+
+    if example["label"]== 1:
+        label_str = "biased" 
+    elif example["label"]== 0:
+        label_str = "niet-biased"
+
+    label_ids = tokenizer(
+        label_str,
+        truncation=True,
+        padding="max_length",
+        max_length=3,
+    )["input_ids"]
+
+    label_ids = [
+        tok if tok != tokenizer.pad_token_id else -100
+        for tok in label_ids
+    ]
+    model_inputs["labels"] = label_ids
     return model_inputs
 
 #small_train_dataset = dataset["train"].select(range(1))
@@ -122,13 +130,14 @@ training_args = Seq2SeqTrainingArguments(
     output_dir="./results",
     eval_strategy="epoch",
     learning_rate=5e-5,                     
-    per_device_train_batch_size=1,         
-    per_device_eval_batch_size=1,         
-    num_train_epochs=5,                   
-    weight_decay=0.0,                      
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=2,
+    per_device_eval_batch_size=4,       
+    num_train_epochs=5,         
+    weight_decay=0.0,                    
     save_strategy="epoch",                    
     logging_dir="./logs",
-    logging_steps=1,                       
+    logging_steps=1,                 
     report_to="none",
     load_best_model_at_end=True,
     metric_for_best_model="f1_macro",
