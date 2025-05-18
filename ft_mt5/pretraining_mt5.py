@@ -128,11 +128,11 @@ tokenized_test.set_format(type="torch", columns=["input_ids", "attention_mask", 
 
 training_args = Seq2SeqTrainingArguments(
     output_dir="./results",
-    evaluation_strategy="epoch"
+    evaluation_strategy="epoch",
     learning_rate=5e-5,                     
     per_device_train_batch_size=4,
     gradient_accumulation_steps=2,
-    per_device_eval_batch_size=4,       
+    per_device_eval_batch_size=4,      
     num_train_epochs=5,         
     weight_decay=0.0,                    
     save_strategy="epoch",                    
