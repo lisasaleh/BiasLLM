@@ -39,17 +39,32 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
 # metrics
 
 def compute_metrics(pred):
-    decoded_preds = tokenizer.batch_decode(pred.predictions, skip_special_tokens=True)
-    decoded_labels = tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)
-    map_lbl = {"biased": 1, "niet-biased": 0}
-    y_true = [map_lbl.get(lbl, int(lbl)) for lbl in decoded_labels]
-    y_pred = [map_lbl.get(p, int(p)) for p in decoded_preds]
+    # predictions can be raw logits or token IDs; ensure we have IDs
+    preds = pred.predictions
+    if isinstance(preds, np.ndarray) and preds.ndim == 3:
+        preds = np.argmax(preds, axis=-1)
+
+    # decode to strings and normalize
+    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
+    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
+
+    # map any string containing 'biased' → 1, anything else → 0
+    y_pred = [1 if 'biased' in p else 0 for p in decoded_preds]
+    y_true = [1 if 'biased' in l else 0 for l in decoded_labels]
+
+    #  compute metrics
+    acc  = (np.array(y_true) == np.array(y_pred)).mean()
+    f1   = f1_score(y_true, y_pred, average="macro")
+    prec = precision_score(y_true, y_pred, average="macro")
+    rec  = recall_score(y_true, y_pred, average="macro")
+
     return {
-        "accuracy": (np.array(y_true) == np.array(y_pred)).mean(),
-        "f1_macro": f1_score(y_true, y_pred, average="macro"),
-        "precision_macro": precision_score(y_true, y_pred, average="macro"),
-        "recall_macro": recall_score(y_true, y_pred, average="macro")
+        "accuracy": acc,
+        "f1_macro": f1,
+        "precision_macro": prec,
+        "recall_macro": rec
     }
+
 
 # model & tokenizer
 model_name = "google/mt5-base"
