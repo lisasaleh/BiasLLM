@@ -90,7 +90,7 @@ for ds in (tokenized_train, tokenized_val, tokenized_test):
     ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
 # training arguments
-taining_args = Seq2SeqTrainingArguments(
+training_args = Seq2SeqTrainingArguments(
     output_dir="./results",
     evaluation_strategy="epoch",
     learning_rate=5e-5,
