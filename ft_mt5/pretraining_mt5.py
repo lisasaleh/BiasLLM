@@ -1,71 +1,81 @@
 from transformers import MT5ForConditionalGeneration, MT5Tokenizer
-from datasets import load_dataset, Dataset, load_metric
-from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
+from datasets import load_dataset, Dataset
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, EarlyStoppingCallback
 import numpy as np
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
 import torch
-import torch.nn.functional as F
 import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
 import random
+import argparse
 
-random.seed(42)
-np.random.seed(42)
-torch.manual_seed(42)
+# for saving the model
+STRAT_ABBREV = {
+    "undersample": "us",
+    "oversample":  "os",
+    "balanced":    "bl",
+    "normal":      "nm",
+}
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Fine-tune MT5 for bias detection")
+    p.add_argument("--sampling", type=str, default="undersample",
+                   choices=list(STRAT_ABBREV.keys()),
+                   help="Data sampling strategy")
+    p.add_argument("--epochs", type=int, default=12,
+                   help="Number of training epochs")
+    p.add_argument("--lr", type=float, default=5e-5, help="Learning Rate")
+    p.add_argument("--bs", type=int, default=4, help="Batch Size")
+    p.add_argument("--wd", type=float, default=0.0, help="Weight decay")
+    p.add_argument("--patience", type=int, default=2,
+                   help="Early stopping patience")
+    p.add_argument("--output_dir", type=str, default="./results")
+    p.add_argument("--seed", type=int, default=42)
+    return p.parse_args()
 
 
-def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=42):
+# data sampling utility
+def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=None):
+    if random_state is None:
+        random_state = 42
+
     biased = df[df.label == 1]
     unbiased = df[df.label == 0]
 
     if strategy == "undersample":
-        # Undersample the unbiased (majority) class to match a specified ratio
         unbiased_sampled = unbiased.sample(frac=undersample_ratio, random_state=random_state)
         return pd.concat([biased, unbiased_sampled])
-
     elif strategy == "oversample":
-        # Duplicate the biased (minority) class oversample_factor times
         return pd.concat([biased] * oversample_factor + [unbiased])
-
     elif strategy == "balanced":
-        # Target 50% biased, 50% unbiased in the final dataset (or as specified by balanced_neg_ratio)
-        target_total = len(df)  # preserve the original size
-        unbiased_target = int(target_total * balanced_neg_ratio)  # target number of unbiased samples  
-        biased_target = target_total - unbiased_target  # target number of biased samples 
-
-        # Sample unbiased samples to match the target
+        target_total = len(df)
+        unbiased_target = int(target_total * balanced_neg_ratio)
+        biased_target = target_total - unbiased_target
         neg_sampled = unbiased.sample(n=unbiased_target, random_state=random_state)
-
-        # Compute the number of times to duplicate all biased samples
         repeats = biased_target // len(biased)
-        # Compute the remainder of biased samples to sample to reach target
         remainder = biased_target % len(biased)
-
-        # Sample biased samples to match the target based on the number of repeats and remainder
         biased_repeated = pd.concat([biased] * repeats + [biased.sample(n=remainder, random_state=random_state)])
         return pd.concat([biased_repeated, neg_sampled])
-
     elif strategy == "normal":
         return df
-
     else:
         raise ValueError("Unsupported strategy.")
 
-
+# metrics
 def compute_metrics(pred):
-    # predicted token IDs and label IDs
-    predictions, label_ids = pred.predictions, pred.label_ids
+    # predictions can be raw logits or token IDs; ensure we have IDs
+    preds = pred.predictions
+    if isinstance(preds, np.ndarray) and preds.ndim == 3:
+        preds = np.argmax(preds, axis=-1)
 
-    # decode into strings
-    decoded_preds  = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-    decoded_labels = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+    # decode to strings and normalize
+    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
+    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
 
-    # convert "biased"/"niet-biased" to 0/1
-    map_lbl = {"biased": 1, "niet-biased": 0}
-    y_true = [map_lbl.get(lbl, int(lbl)) for lbl in decoded_labels]
-    y_pred = [map_lbl.get(p, int(p)) for p in decoded_preds]
+    # map any string containing 'biased' → 1, anything else → 0
+    y_pred = [1 if 'biased' in p else 0 for p in decoded_preds]
+    y_true = [1 if 'biased' in l else 0 for l in decoded_labels]
 
-    # use macro so both classes count eqaully
+    #  compute metrics
     acc  = (np.array(y_true) == np.array(y_pred)).mean()
     f1   = f1_score(y_true, y_pred, average="macro")
     prec = precision_score(y_true, y_pred, average="macro")
@@ -77,98 +87,95 @@ def compute_metrics(pred):
         "precision_macro": prec,
         "recall_macro": rec
     }
-    
-model_name = "google/mt5-base"
-tokenizer = MT5Tokenizer.from_pretrained(model_name)
-model = MT5ForConditionalGeneration.from_pretrained(model_name)
-
-dataset = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")
-
 
 def preprocess(example, makeitwords=True):
-    model_inputs = tokenizer(example['text'], truncation=True, padding="max_length", max_length=512)
-
-    if example["label"]== 1:
-        label_str = "biased" 
-    elif example["label"]== 0:
-        label_str = "niet-biased"
-
+    # tokenize inputs
+    model_inputs = tokenizer(
+        example['text'], truncation=True, padding="max_length", max_length=512
+    )
+    # build label string
+    label_str = "biased" if example["label"] == 1 else "niet-biased"
+    # tokenize labels
     label_ids = tokenizer(
-        label_str,
-        truncation=True,
-        padding="max_length",
-        max_length=3,
+        label_str, truncation=True, padding="max_length", max_length=3
     )["input_ids"]
-
-    label_ids = [
-        tok if tok != tokenizer.pad_token_id else -100
-        for tok in label_ids
-    ]
+    # mask padding
+    label_ids = [tok if tok != tokenizer.pad_token_id else -100 for tok in label_ids]
     model_inputs["labels"] = label_ids
     return model_inputs
 
-#small_train_dataset = dataset["train"].select(range(1))
-train_dataset = dataset["train"].to_pandas()
-sampled_df = sample_data(train_dataset, strategy='undersample')
-# added shuffeling because the undersample does not shuffle
-sampled_df = sampled_df.sample(frac=1, random_state=42).reset_index(drop=True)
-train_dataset = Dataset.from_pandas(sampled_df, preserve_index=False)
-test_dataset = dataset["test"]
-tokenized_test = test_dataset.map(preprocess)
-tokenized_train = train_dataset.map(preprocess)
-#small_val_dataset = dataset["validation"].select(range(1))
-val_dataset = dataset["validation"].to_pandas()
-val_dataset = Dataset.from_pandas(val_dataset, preserve_index=False)
-tokenized_val = val_dataset.map(preprocess)
-#tokenized_train = small_train_dataset.map(preprocess)
-tokenized_train.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-#tokenized_val = small_val_dataset.map(preprocess)
-tokenized_val.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
-tokenized_test.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+if __name__ == "__main__":
+    args = parse_args()
 
-training_args = Seq2SeqTrainingArguments(
-    output_dir="./results",
-    evaluation_strategy="epoch",
-    learning_rate=5e-5,                     
-    per_device_train_batch_size=4,
-    gradient_accumulation_steps=2,
-    per_device_eval_batch_size=4,      
-    num_train_epochs=5,         
-    weight_decay=0.0,                    
-    save_strategy="epoch",                    
-    logging_dir="./logs",
-    logging_steps=1,                 
-    report_to="none",
-    load_best_model_at_end=True,
-    metric_for_best_model="f1_macro",
-    #generation_max_length=2
-    )
-training_args.generation_config = None 
-trainer = Seq2SeqTrainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_train,
-    eval_dataset=tokenized_val,
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=2)]
+    # reproducibility
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    # model & tokenizer
+    model_name = "google/mt5-base"
+    tokenizer = MT5Tokenizer.from_pretrained(model_name)
+    model = MT5ForConditionalGeneration.from_pretrained(model_name)
+
+    dataset = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")
+    # prepare datasets
+    train_df = dataset["train"].to_pandas()
+    train_df = sample_data(train_df, strategy=args.sampling, random_state=args.seed).sample(frac=1, random_state=args.seed).reset_index(drop=True)
+    train_ds = Dataset.from_pandas(train_df, preserve_index=False)
+    val_df = dataset["validation"].to_pandas()
+    val_ds = Dataset.from_pandas(val_df, preserve_index=False)
+    test_ds = dataset["test"]
+
+    tokenized_train = train_ds.map(preprocess)
+    tokenized_val = val_ds.map(preprocess)
+    tokenized_test = test_ds.map(preprocess)
+
+    for ds in (tokenized_train, tokenized_val, tokenized_test):
+        ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+
+    # training arguments
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=args.output_dir,
+        evaluation_strategy="epoch",
+        learning_rate=args.lr,
+        per_device_train_batch_size=args.bs,
+        gradient_accumulation_steps=2,
+        per_device_eval_batch_size=args.bs,
+        num_train_epochs=args.epochs,
+        weight_decay=args.wd,
+        save_strategy="epoch",
+        logging_dir="./logs",
+        logging_steps=10,
+        report_to="none",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1_macro",
+        predict_with_generate=True,
     )
 
-if __name__ =="__main__":
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
+    )
     print("Starting training...")
     trainer.train()
     print("Training complete.")
+
+    # evaluate & save best
     eval_metrics = trainer.evaluate()
     best_f1 = eval_metrics["eval_f1_macro"]
     print(f"Best validation F1: {best_f1:.4f}")
-
-    model_dir = f"mt5-base-finetuned-f1_{best_f1:.4f}"
-    trainer.save_model(model_dir)
+    abbrev = STRAT_ABBREV[args.sampling]
+    safe_name = model_name.replace("/", "-")
+    model_dir = f"{args.output_dir}/{safe_name}_{abbrev}_f1_{best_f1:.4f}"
     print(f"Model saved to {model_dir}")
-    
-    tokenized_test.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    trainer.save_model(model_dir)
 
-    predictions = trainer.predict(tokenized_test)
-
-    metrics = compute_metrics(predictions)
-    print("Test metrics:", metrics)
+    # test
+    test_pred = trainer.predict(tokenized_test)
+    test_metrics = compute_metrics(test_pred)
+    print("Test metrics:", test_metrics)
