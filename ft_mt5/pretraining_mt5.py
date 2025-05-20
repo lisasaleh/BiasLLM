@@ -113,6 +113,8 @@ def preprocess_batch(batch):
     # batch["text"] is a list of length B
     # batch["label"] is a list of length B
     # tokenize all texts in one go:
+    print("Raw label:", batch["label"][0])
+
     model_inputs = tokenizer(
         batch["text"],
         truncation=True,
@@ -127,12 +129,18 @@ def preprocess_batch(batch):
             label_str,
             truncation=True,
             padding="max_length",
-            max_length=5,
+            max_length=6,
         )["input_ids"]
         # mask padding tokens
         lab_ids = [tok if tok != tokenizer.pad_token_id else -100
                    for tok in lab_ids]
         labels.append(lab_ids)
+        print(lab_ids)
+        if len(labels) <= 2:
+            print("  decoded:", tokenizer.decode(
+                [t for t in lab_ids if t != -100],
+                skip_special_tokens=False
+            ))
 
     # add to the dict and return
     model_inputs["labels"] = labels
