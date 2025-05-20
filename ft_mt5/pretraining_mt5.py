@@ -109,6 +109,35 @@ def preprocess(example, makeitwords=True):
     model_inputs["labels"] = label_ids
     return model_inputs
 
+def preprocess_batch(batch):
+    # batch["text"] is a list of length B
+    # batch["label"] is a list of length B
+    # tokenize all texts in one go:
+    model_inputs = tokenizer(
+        batch["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=512,
+    )
+    # build label sequences for each example
+    labels = []
+    for lab in batch["label"]:
+        label_str = "biased" if lab == 1 else "niet-biased"
+        lab_ids = tokenizer(
+            label_str,
+            truncation=True,
+            padding="max_length",
+            max_length=3,
+        )["input_ids"]
+        # mask padding tokens
+        lab_ids = [tok if tok != tokenizer.pad_token_id else -100
+                   for tok in lab_ids]
+        labels.append(lab_ids)
+
+    # add to the dict and return
+    model_inputs["labels"] = labels
+    return model_inputs
+
 class FocalLoss(nn.Module):
     def __init__(self, alpha, device, gamma=2.0, ignore_index=-100):
         super().__init__()
