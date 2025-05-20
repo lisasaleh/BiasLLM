@@ -7,6 +7,9 @@ import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
 import random
 import argparse
+import torch.nn as nn
+from sklearn.utils.class_weight import compute_class_weight
+
 
 # for saving the model
 STRAT_ABBREV = {
@@ -30,6 +33,8 @@ def parse_args():
                    help="Early stopping patience")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--focal_loss", action="store_true", default=False, 
+                   help='Use a different loss that helps against unbalanced datasetes')
     return p.parse_args()
 
 
@@ -104,6 +109,37 @@ def preprocess(example, makeitwords=True):
     model_inputs["labels"] = label_ids
     return model_inputs
 
+class FocalLoss(nn.Module):
+    def __init__(self, alpha, device, gamma=2.0, ignore_index=-100):
+        super().__init__()
+        self.alpha = torch.tensor(alpha, dtype=torch.float, device=device)   # list or scalar
+        self.gamma = gamma
+        self.ce = nn.CrossEntropyLoss(reduction="none",
+                                    ignore_index=ignore_index)
+    def forward(self, logits, labels):
+        B,S,V = logits.shape
+        logits = logits.view(-1, V)
+        labels = labels.view(-1)
+        ce_loss = self.ce(logits, labels)
+        pt = torch.exp(-ce_loss)
+        alpha_t = self.alpha[labels]    # per-token weight
+        focal_factor = alpha_t * (1 - pt) ** self.gamma
+        return (focal_factor * ce_loss).mean()
+
+class Seq2SeqWithFocal(Seq2SeqTrainer):
+    def __init__(self, focal_alpha, focal_gamma, **kwargs):
+        super().__init__(**kwargs)
+        device = self.model.device
+        self.focal_loss = FocalLoss(alpha=focal_alpha,
+                                    device=device,
+                                    gamma=focal_gamma,
+                                    ignore_index=self.model.config.pad_token_id)
+    def compute_loss(self, model, inputs, return_outputs=False):
+        outputs = model(**inputs)
+        loss = self.focal_loss(outputs.logits, inputs["labels"])
+        return (loss, outputs) if return_outputs else loss
+    
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -125,6 +161,15 @@ if __name__ == "__main__":
     val_df = dataset["validation"].to_pandas()
     val_ds = Dataset.from_pandas(val_df, preserve_index=False)
     test_ds = dataset["test"]
+
+    #the weights for the FL
+    weights = None
+    if args.focal_loss:
+        weights = compute_class_weight(
+            class_weight="balanced",
+            classes=np.array([0, 1]),
+            y=train_df.label.values
+        )
 
     tokenized_train = train_ds.map(preprocess)
     tokenized_val = val_ds.map(preprocess)
@@ -151,16 +196,30 @@ if __name__ == "__main__":
         metric_for_best_model="f1_macro",
         predict_with_generate=True,
     )
+    if args.focal_loss  is True:
+        
 
-    trainer = Seq2SeqTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_train,
-        eval_dataset=tokenized_val,
-        tokenizer=tokenizer,
-        compute_metrics=compute_metrics,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
-    )
+        trainer = Seq2SeqWithFocal(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_val,
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
+            focal_alpha=weights.tolist(),
+            focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
+        )
+    else:
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_val,
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
+        )
     print("Starting training...")
     trainer.train()
     print("Training complete.")
@@ -171,7 +230,10 @@ if __name__ == "__main__":
     print(f"Best validation F1: {best_f1:.4f}")
     abbrev = STRAT_ABBREV[args.sampling]
     safe_name = model_name.replace("/", "-")
-    model_dir = f"{args.output_dir}/{safe_name}_{abbrev}_f1_{best_f1:.4f}"
+    if args.focal_loss:
+        model_dir = f"{args.output_dir}/{safe_name}_FE_f1_{best_f1:.4f}"
+    else:
+        model_dir = f"{args.output_dir}/{safe_name}_{abbrev}_f1_{best_f1:.4f}"
     print(f"Model saved to {model_dir}")
     trainer.save_model(model_dir)
 
