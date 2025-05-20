@@ -203,7 +203,6 @@ if __name__ == "__main__":
     test_ds = dataset["test"]
 
     #the weights for the FL
-    weights = None
     if args.focal_loss:
         weights = compute_class_weight(
             class_weight="balanced",
@@ -257,29 +256,30 @@ if __name__ == "__main__":
         predict_with_generate=True,
     )
 
-    if args.focal_loss is True:
-        trainer = Seq2SeqWithFocal(
-            model=model,
-            args=training_args,
-            train_dataset=tokenized_train,
-            eval_dataset=tokenized_val,
-            tokenizer=tokenizer,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
-            focal_alpha=weights.tolist(),
-            focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
-        )
-    else:
-        trainer = Seq2SeqTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=tokenized_train,
-            eval_dataset=tokenized_val,
-            tokenizer=tokenizer,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
-        )
-    print(f"Focal Loss is :{args.focal_loss:.4f}")
+    # if args.focal_loss is True:
+    #     trainer = Seq2SeqWithFocal(
+    #         model=model,
+    #         args=training_args,
+    #         train_dataset=tokenized_train,
+    #         eval_dataset=tokenized_val,
+    #         tokenizer=tokenizer,
+    #         compute_metrics=compute_metrics,
+    #         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
+    #         focal_alpha=weights.tolist(),
+    #         focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
+    #     )
+    # else:
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
+    )
+    print("Using Seq2SeqTrainer? ", not args.focal_loss)
+    print("Instantiating Trainer class:", type(trainer))
     print("Starting training...")
     trainer.train()
     print("Training complete.")
