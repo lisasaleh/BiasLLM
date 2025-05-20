@@ -253,8 +253,7 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
         predict_with_generate=True,
-        label_pad_token_id=-100,
-
+        label_pad_token_id=-100
     )
 
     # if args.focal_loss is True:
