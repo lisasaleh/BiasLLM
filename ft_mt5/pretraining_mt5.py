@@ -127,7 +127,7 @@ def preprocess_batch(batch):
             label_str,
             truncation=True,
             padding="max_length",
-            max_length=3,
+            max_length=5,
         )["input_ids"]
         # mask padding tokens
         lab_ids = [tok if tok != tokenizer.pad_token_id else -100
