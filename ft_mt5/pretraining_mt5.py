@@ -27,7 +27,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=12,
                    help="Number of training epochs")
     p.add_argument("--lr", type=float, default=5e-5, help="Learning Rate")
-    p.add_argument("--bs", type=int, default=4, help="Batch Size")
+    p.add_argument("--bs", type=int, default=64, help="Batch Size")
     p.add_argument("--wd", type=float, default=0.0, help="Weight decay")
     p.add_argument("--patience", type=int, default=2,
                    help="Early stopping patience")
@@ -135,8 +135,19 @@ class Seq2SeqWithFocal(Seq2SeqTrainer):
                                     gamma=focal_gamma,
                                     ignore_index=self.model.config.pad_token_id)
     def compute_loss(self, model, inputs, return_outputs=False):
+        # forward
         outputs = model(**inputs)
-        loss = self.focal_loss(outputs.logits, inputs["labels"])
+        logits = outputs.logits  # (B, S, V)
+        # flatten to (B*S, V) and (B*S,)
+        vocab_size = logits.size(-1)
+        loss_fct = nn.CrossEntropyLoss(
+            weight=weight_tensor,
+            ignore_index=tokenizer.pad_token_id
+        )
+        loss = loss_fct(
+            logits.view(-1, vocab_size),
+            inputs["labels"].view(-1)
+        )
         return (loss, outputs) if return_outputs else loss
     
 
@@ -169,11 +180,30 @@ if __name__ == "__main__":
             class_weight="balanced",
             classes=np.array([0, 1]),
             y=train_df.label.values
-        )
+        ).tolist()  # e.g. [w_neg, w_pos]
+        weight_tensor = torch.tensor(weights, device=model.device)
 
-    tokenized_train = train_ds.map(preprocess)
-    tokenized_val = val_ds.map(preprocess)
-    tokenized_test = test_ds.map(preprocess)
+    tokenized_train = train_ds.map(
+        preprocess,
+        batched=True,
+        batch_size=64,
+        num_proc=8,
+        remove_columns=train_ds.column_names,
+    )
+    tokenized_val = val_ds.map(
+        preprocess,
+        batched=True,
+        batch_size=64,
+        num_proc=8,
+        remove_columns=val_ds.column_names,
+    )
+    tokenized_test = test_ds.map(
+        preprocess,
+        batched=True,
+        batch_size=64,
+        num_proc=8,
+        remove_columns=test_ds.column_names,
+    )
 
     for ds in (tokenized_train, tokenized_val, tokenized_test):
         ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
@@ -185,6 +215,7 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         per_device_train_batch_size=args.bs,
         gradient_accumulation_steps=2,
+        fp16=True,
         per_device_eval_batch_size=args.bs,
         num_train_epochs=args.epochs,
         weight_decay=args.wd,
@@ -196,9 +227,9 @@ if __name__ == "__main__":
         metric_for_best_model="f1_macro",
         predict_with_generate=True,
     )
+
     if args.focal_loss  is True:
         
-
         trainer = Seq2SeqWithFocal(
             model=model,
             args=training_args,
