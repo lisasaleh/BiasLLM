@@ -1,6 +1,6 @@
 from transformers import MT5ForConditionalGeneration, MT5Tokenizer
 from datasets import load_dataset, Dataset
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, EarlyStoppingCallback
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, EarlyStoppingCallback, DataCollatorForSeq2Seq
 import numpy as np
 import torch
 import pandas as pd
@@ -252,9 +252,8 @@ if __name__ == "__main__":
         report_to="none",
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
-        predict_with_generate=True,
-        label_pad_token_id=-100
-    )
+        predict_with_generate=True
+            )
 
     # if args.focal_loss is True:
     #     trainer = Seq2SeqWithFocal(
@@ -269,12 +268,18 @@ if __name__ == "__main__":
     #         focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
     #     )
     # else:
+    data_collator = DataCollatorForSeq2Seq(
+    tokenizer=tokenizer,
+    model=model,
+    label_pad_token_id=-100,
+)
     trainer = Seq2SeqTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
         eval_dataset=tokenized_val,
         tokenizer=tokenizer,
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
     )
