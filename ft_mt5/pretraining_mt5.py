@@ -257,8 +257,7 @@ if __name__ == "__main__":
         predict_with_generate=True,
     )
 
-    if args.focal_loss  is True:
-        
+    if args.focal_loss is True:
         trainer = Seq2SeqWithFocal(
             model=model,
             args=training_args,
@@ -280,6 +279,7 @@ if __name__ == "__main__":
             compute_metrics=compute_metrics,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
         )
+    print(f"Focal Loss is :{args.focal_loss:.4f}")
     print("Starting training...")
     trainer.train()
     print("Training complete.")
