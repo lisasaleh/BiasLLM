@@ -213,21 +213,21 @@ if __name__ == "__main__":
         weight_tensor = torch.tensor(weights, device=model.device)
 
     tokenized_train = train_ds.map(
-        preprocess,
+        preprocess_batch,
         batched=True,
         batch_size=64,
         num_proc=8,
         remove_columns=train_ds.column_names,
     )
     tokenized_val = val_ds.map(
-        preprocess,
+        preprocess_batch,
         batched=True,
         batch_size=64,
         num_proc=8,
         remove_columns=val_ds.column_names,
     )
     tokenized_test = test_ds.map(
-        preprocess,
+        preprocess_batch,
         batched=True,
         batch_size=64,
         num_proc=8,
