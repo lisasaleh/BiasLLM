@@ -3,8 +3,8 @@ from inseq import load_model
 model_name        = "google/mt5-base"
 model_path        = "../ft_mt5/results/google-mt5-base_os_f1_0.7492"
 # load both models with the same attribution method
-model_normal = load_model(model_name, method="integrated_gradients")
-model_ft_mt5 = load_model(model_path, method="integrated_gradients")
+model_normal = load_model(model_name, "integrated_gradients")
+model_ft_mt5 = load_model(model_path, "integrated_gradients")
 
 examples = {
   "train": "mens (crm) oordeelde dat een onderwijsstichting geen verboden " 
