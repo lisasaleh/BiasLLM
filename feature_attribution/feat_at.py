@@ -23,6 +23,6 @@ for split, text in examples.items():
         generation_args={"max_new_tokens": 5}
     )
 
-    # save to disk as JSON
-    out_norm.to_json(f"attributions_normal_{split}.json")
-    out_ft.to_json(  f"attributions_ft_{split}.json")
+    # save to disk
+    out_norm.save(f"attributions_normal_{split}.json", overwrite=True)
+    out_ft.  save(f"attributions_ft_{split}.json", overwrite=True)
