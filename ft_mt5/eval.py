@@ -60,8 +60,17 @@ def main():
     args = parse_args()
 
     # 1) Load model & tokenizer
-    tokenizer = MT5Tokenizer.from_pretrained(args.model_name_or_path)
-    model = MT5ForConditionalGeneration.from_pretrained(args.model_name_or_path)
+    tokenizer = MT5Tokenizer.from_pretrained(
+        args.model_name_or_path,
+        local_files_only=True,
+        repo_type="model"
+    )
+    model = MT5ForConditionalGeneration.from_pretrained(
+        args.model_name_or_path,
+        local_files_only=True,
+        repo_type="model"
+    )
+
     model.to(args.device).eval()
 
     # 2) Load test split
