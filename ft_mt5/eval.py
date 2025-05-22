@@ -59,18 +59,25 @@ def classify_preds(preds):
 
 def main():
     args = parse_args()
+    # 1) Clean up the path: strip any "file://"
+    model_dir = args.model_name_or_path
+    if model_dir.startswith("file://"):
+        model_dir = model_dir[len("file://"):]
 
-    model_dir = os.path.abspath(args.model_name_or_path)
-    model_uri = "file://" + model_dir
+    # 2) Expand and verify
+    model_dir = os.path.abspath(model_dir)
+    if not os.path.isdir(model_dir):
+        raise ValueError(f"Model directory not found: {model_dir}")
+    print(f"Loading from local folder: {model_dir}")
 
     # 1) Load model & tokenizer
     tokenizer = MT5Tokenizer.from_pretrained(
-        model_uri,
+        model_dir,
         local_files_only=True,
         repo_type="model"
     )
     model = MT5ForConditionalGeneration.from_pretrained(
-        model_uri,
+        model_dir,
         local_files_only=True,
         repo_type="model"
     )
