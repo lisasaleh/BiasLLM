@@ -40,15 +40,40 @@ def parse_args():
     return p.parse_args()
 
 def load_local_mt5(model_dir, device):
-    # 1) config & model weights
+    # 1) config & new model
     cfg = MT5Config.from_json_file(os.path.join(model_dir, "config.json"))
     model = MT5ForConditionalGeneration(cfg)
-    state = torch.load(os.path.join(model_dir, "pytorch_model.bin"),
-                       map_location="cpu")
-    model.load_state_dict(state)
+
+    # 2) load raw checkpoint
+    raw_state = torch.load(
+        os.path.join(model_dir, "pytorch_model.bin"),
+        map_location="cpu"
+    )
+
+    # 3) if wrapped under "model" or "module", unwrap it
+    if "model" in raw_state and isinstance(raw_state["model"], dict):
+        raw_state = raw_state["model"]
+    # detect a common prefix (e.g. "model.", "module.")
+    # take first key, split at first '.', see if prefix key exists
+    first_key = next(iter(raw_state))
+    if "." in first_key:
+        prefix = first_key.split(".")[0] + "."
+        # strip that prefix from all keys
+        cleaned = {k[len(prefix):] if k.startswith(prefix) else k: v
+                   for k, v in raw_state.items()}
+    else:
+        cleaned = raw_state
+
+    # 4) load into model
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    if missing:
+        print("⚠️  Warning: these keys were missing from the checkpoint:", missing)
+    if unexpected:
+        print("⚠️  Warning: these keys were unexpected in the checkpoint:", unexpected)
+
     model.to(device).eval()
-    # 2) tokenizer (SentencePiece)
-    # MT5Tokenizer can be initialized directly from the .model file:
+
+    # 5) tokenizer
     tok = MT5Tokenizer(
         sp_model_file=os.path.join(model_dir, "spiece.model"),
         eos_token="</s>",
@@ -56,6 +81,7 @@ def load_local_mt5(model_dir, device):
         unk_token="<unk>"
     )
     return model, tok
+
 
 def classify_preds(preds):
     """
