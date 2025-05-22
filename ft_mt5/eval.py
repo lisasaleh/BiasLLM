@@ -8,6 +8,7 @@ from transformers import (
     MT5ForConditionalGeneration,
     MT5Tokenizer,
     DataCollatorForSeq2Seq,
+    MT5Config
 )
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -37,6 +38,24 @@ def parse_args():
         help="Where to dump the predictions"
     )
     return p.parse_args()
+
+def load_local_mt5(model_dir, device):
+    # 1) config & model weights
+    cfg = MT5Config.from_json_file(os.path.join(model_dir, "config.json"))
+    model = MT5ForConditionalGeneration(cfg)
+    state = torch.load(os.path.join(model_dir, "pytorch_model.bin"),
+                       map_location="cpu")
+    model.load_state_dict(state)
+    model.to(device).eval()
+    # 2) tokenizer (SentencePiece)
+    # MT5Tokenizer can be initialized directly from the .model file:
+    tok = MT5Tokenizer(
+        sp_model_file=os.path.join(model_dir, "spiece.model"),
+        eos_token="</s>",
+        pad_token="<pad>",
+        unk_token="<unk>"
+    )
+    return model, tok
 
 def classify_preds(preds):
     """
@@ -71,16 +90,7 @@ def main():
     print(f"Loading from local folder: {model_dir}")
 
     # 1) Load model & tokenizer
-    tokenizer = MT5Tokenizer.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        repo_type="model"
-    )
-    model = MT5ForConditionalGeneration.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        repo_type="model"
-    )
+    model, tokenizer = load_local_mt5(model_dir, args.device)
 
     model.to(args.device).eval()
 
