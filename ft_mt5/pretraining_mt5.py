@@ -38,6 +38,63 @@ def parse_args():
     return p.parse_args()
 
 
+def classify_preds(list):
+    """
+    Classify each prediction string as:
+      0  if it’s exactly “niet-biased” or “niet biased anywhere in the text” (case-insensitive),
+      1  if it starts with “biased” (case-insensitive),
+     -1  otherwise.
+
+    Parameters:
+        preds: List of prediction strings.
+
+    Returns:
+        List of ints (0, 1, or -1) corresponding to each input string.
+    """
+    pattern = re.compile(r'niet[- ]biased', flags=re.IGNORECASE)
+    result = []
+    for pred in list:
+        txt = pred.strip()
+        if pattern.fullmatch(txt):
+            result.append(0)
+        elif re.match(r'biased', txt, flags=re.IGNORECASE):
+            result.append(1)
+        else:
+            result.append(-1)
+    return result
+
+# metrics
+def compute_metrics(pred):
+    # predictions can be raw logits or token IDs; ensure we have IDs
+    preds = pred.predictions
+    if isinstance(preds, np.ndarray) and preds.ndim == 3:
+        preds = np.argmax(preds, axis=-1)
+
+    # decode to strings and normalize
+    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
+    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
+
+    # map any string containing 'biased' → 1, anything else → 0
+    y_pred = classify_preds(decoded_preds)
+    y_true = classify_preds(decoded_labels)
+
+    #  compute metrics
+    acc  = (np.array(y_true) == np.array(y_pred)).mean()
+    f1   = f1_score(y_true, y_pred, average="macro")
+    prec = precision_score(y_true, y_pred, average="macro")
+    rec  = recall_score(y_true, y_pred, average="macro")
+    na_pred = y_pred.count(-1)
+    na_lab = y_pred.count(-1)
+
+    return {
+        "accuracy": acc,
+        "f1_macro": f1,
+        "precision_macro": prec,
+        "recall_macro": rec,
+        "no_pred": na_pred,
+        "no_label": na_lab
+    }
+
 # data sampling utility
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=None):
     if random_state is None:
@@ -64,34 +121,6 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
         return df
     else:
         raise ValueError("Unsupported strategy.")
-
-# metrics
-def compute_metrics(pred):
-    # predictions can be raw logits or token IDs; ensure we have IDs
-    preds = pred.predictions
-    if isinstance(preds, np.ndarray) and preds.ndim == 3:
-        preds = np.argmax(preds, axis=-1)
-
-    # decode to strings and normalize
-    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
-    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
-
-    # map any string containing 'biased' → 1, anything else → 0
-    y_pred = [1 if 'biased' in p else 0 for p in decoded_preds]
-    y_true = [1 if 'biased' in l else 0 for l in decoded_labels]
-
-    #  compute metrics
-    acc  = (np.array(y_true) == np.array(y_pred)).mean()
-    f1   = f1_score(y_true, y_pred, average="macro")
-    prec = precision_score(y_true, y_pred, average="macro")
-    rec  = recall_score(y_true, y_pred, average="macro")
-
-    return {
-        "accuracy": acc,
-        "f1_macro": f1,
-        "precision_macro": prec,
-        "recall_macro": rec
-    }
 
 def preprocess(example, makeitwords=True):
     # tokenize inputs
