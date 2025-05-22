@@ -1,187 +1,60 @@
+#!/usr/bin/env python
 import argparse
-import re
-import pandas as pd
-import os
-import torch
-from datasets import load_dataset
-from transformers import (
-    MT5ForConditionalGeneration,
-    MT5Tokenizer,
-    DataCollatorForSeq2Seq,
-    MT5Config
-)
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
+from inseq import load_model
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Evaluate a pretrained mT5 on the Mila&Meentje bias-detection test set"
+    p = argparse.ArgumentParser(description="Generate with a fine-tuned mT5 via inseq")
+    p.add_argument(
+        "--model_path", type=str, required=True,
+        help="Path to your fine-tuned mkT5 folder (containing config.json, pytorch_model.bin, spiece.model)"
     )
     p.add_argument(
-        "--model_name_or_path", type=str, required=True,
-        help="Path or HF identifier of your fine-tuned mT5"
+        "--split", choices=["train","test","validation"], default="test",
+        help="Which split of the Mila&Meentje dataset to run on"
     )
     p.add_argument(
-        "--batch_size", type=int, default=16,
-        help="Batch size for generation"
-    )
-    p.add_argument(
-        "--max_length", type=int, default=3,
-        help="Max length of the generated label (e.g. 'biased' or 'niet-biased')"
-    )
-    p.add_argument(
-        "--device", type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu"
-    )
-    p.add_argument(
-        "--output_csv", type=str, default="test_predictions.csv",
-        help="Where to dump the predictions"
+        "--max_new_tokens", type=int, default=5,
+        help="How many tokens to generate per example"
     )
     return p.parse_args()
 
-def load_local_mt5(model_dir, device):
-    # 1) config & new model
-    cfg = MT5Config.from_json_file(os.path.join(model_dir, "config.json"))
-    model = MT5ForConditionalGeneration(cfg)
-
-    # 2) load raw checkpoint
-    raw_state = torch.load(
-        os.path.join(model_dir, "pytorch_model.bin"),
-        map_location="cpu"
-    )
-
-    # 3) if wrapped under "model" or "module", unwrap it
-    if "model" in raw_state and isinstance(raw_state["model"], dict):
-        raw_state = raw_state["model"]
-    # detect a common prefix (e.g. "model.", "module.")
-    # take first key, split at first '.', see if prefix key exists
-    first_key = next(iter(raw_state))
-    if "." in first_key:
-        prefix = first_key.split(".")[0] + "."
-        # strip that prefix from all keys
-        cleaned = {k[len(prefix):] if k.startswith(prefix) else k: v
-                   for k, v in raw_state.items()}
-    else:
-        cleaned = raw_state
-
-    # 4) load into model
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    if missing:
-        print("⚠️  Warning: these keys were missing from the checkpoint:", missing)
-    if unexpected:
-        print("⚠️  Warning: these keys were unexpected in the checkpoint:", unexpected)
-
-    model.to(device).eval()
-
-    # 5) tokenizer
-    tok = MT5Tokenizer(
-        sp_model_file=os.path.join(model_dir, "spiece.model"),
-        eos_token="</s>",
-        pad_token="<pad>",
-        unk_token="<unk>"
-    )
-    return model, tok
-
-
-def classify_preds(preds):
-    """
-    Map each generated string to a label:
-      0 if exactly 'niet-biased' (case-insensitive, dash or space),
-      1 if it starts with 'biased',
-     -1 otherwise.
-    """
-    pat  = re.compile(r'niet[- ]biased', flags=re.IGNORECASE)
-    out  = []
-    for p in preds:
-        txt = p.strip().lower()
-        if pat.fullmatch(txt):
-            out.append(0)
-        elif txt.startswith("biased"):
-            out.append(1)
-        else:
-            out.append(-1)
-    return out
-
 def main():
     args = parse_args()
-    # 1) Clean up the path: strip any "file://"
-    model_dir = args.model_name_or_path
-    if model_dir.startswith("file://"):
-        model_dir = model_dir[len("file://"):]
 
-    # 2) Expand and verify
-    model_dir = os.path.abspath(model_dir)
-    if not os.path.isdir(model_dir):
-        raise ValueError(f"Model directory not found: {model_dir}")
-    print(f"Loading from local folder: {model_dir}")
-
-    # 1) Load model & tokenizer
-    model, tokenizer = load_local_mt5(model_dir, args.device)
-
-    model.to(args.device).eval()
-
-    # 2) Load test split
-    ds = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")
-    test_ds = ds["test"]
-
-    # 3) Preprocess & collator
-    def preprocess(ex):
-        # just encode the input text
-        return tokenizer(
-            ex["text"],
-            truncation=True,
-            padding="max_length",
-            max_length=512,
-        )
-    tokenized_test = test_ds.map(
-        preprocess,
-        batched=True,
-        remove_columns=test_ds.column_names
-    )
-    tokenized_test.set_format(
-        type="torch",
-        columns=["input_ids", "attention_mask"]
-    )
-    collator = DataCollatorForSeq2Seq(
-        tokenizer=tokenizer,
-        model=model,
-        label_pad_token_id=-100,
-        pad_to_multiple_of=None,
-    )
-    loader = DataLoader(
-        tokenized_test,
-        batch_size=args.batch_size,
-        collate_fn=collator
+    # 1) Load via inseq (attribution_method is a required argument, 
+    #    but we won't actually use the attributions here)
+    model = load_model(
+        args.model_path,
+        attribution_method="integrated_gradients"
     )
 
-    # 4) Generate
-    all_preds = []
-    for batch in tqdm(loader, desc="Generating"):
-        input_ids = batch["input_ids"].to(args.device)
-        attention_mask = batch["attention_mask"].to(args.device)
-        outs = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_length=args.max_length,
+    # 2) Grab the underlying HF model & tokenizer
+    hf_model     = model.model
+    hf_tokenizer = model.tokenizer
+    device       = model.device
+
+    # 3) Load the dataset split
+    from datasets import load_dataset
+    ds = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")[args.split]
+
+    # 4) For each example, generate and print
+    for i, sample in enumerate(ds):
+        text = sample["text"]
+        # tokenize + send to device
+        inputs = hf_tokenizer(text, return_tensors="pt").to(device)
+        # generate
+        outs   = hf_model.generate(
+            **inputs,
+            max_new_tokens=args.max_new_tokens,
             num_beams=5,
-            early_stopping=True,
+            early_stopping=True
         )
-        decoded = tokenizer.batch_decode(outs, skip_special_tokens=True)
-        all_preds.extend(decoded)
+        pred = hf_tokenizer.batch_decode(outs, skip_special_tokens=True)[0]
 
-    # 5) Decode & save
-    raw_texts = test_ds["text"]
-    pred_labels = classify_preds(all_preds)
-
-    df = pd.DataFrame({
-        "text": raw_texts,
-        "prediction_str": all_preds,
-        "prediction_label": pred_labels
-    })
-    df.to_csv(args.output_csv, index=False)
-    print(f"→ Wrote {len(df)} predictions to {args.output_csv}")
-    # also print the first 10
-    print(df.head(10).to_string(index=False))
+        print(f"[{i:03d}] ▶️ {pred}")
+        # break or limit how many you print:
+        if i >= 9:
+            break
 
 if __name__ == "__main__":
     main()
