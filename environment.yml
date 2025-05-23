@@ -26,6 +26,7 @@ dependencies:
       - sentencepiece
       - evaluate
       - scikit-learn==1.6.1
+      - pandas
       - trl
       - wandb
       - flash-attn
