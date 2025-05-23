@@ -2,6 +2,8 @@ name: atics_p2
 channels:
   - defaults
   - pytorch
+  - nvidia
+  - conda-forge
 dependencies:
   - python=3.10.12
   - pip=23.2.1
@@ -24,4 +26,7 @@ dependencies:
       - sentencepiece
       - evaluate
       - scikit-learn==1.6.1
+      - trl
+      - wandb
+      - flash-attn
 
