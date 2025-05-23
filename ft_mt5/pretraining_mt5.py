@@ -1,6 +1,6 @@
 from transformers import MT5ForConditionalGeneration, MT5Tokenizer
 from datasets import load_dataset, Dataset
-from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, EarlyStoppingCallback
+from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments, EarlyStoppingCallback, DataCollatorForSeq2Seq
 import numpy as np
 import torch
 import pandas as pd
@@ -38,6 +38,63 @@ def parse_args():
     return p.parse_args()
 
 
+def classify_preds(list):
+    """
+    Classify each prediction string as:
+      0  if it’s exactly “niet-biased” or “niet biased anywhere in the text” (case-insensitive),
+      1  if it starts with “biased” (case-insensitive),
+     -1  otherwise.
+
+    Parameters:
+        preds: List of prediction strings.
+
+    Returns:
+        List of ints (0, 1, or -1) corresponding to each input string.
+    """
+    pattern = re.compile(r'niet[- ]biased', flags=re.IGNORECASE)
+    result = []
+    for pred in list:
+        txt = pred.strip()
+        if pattern.fullmatch(txt):
+            result.append(0)
+        elif re.match(r'biased', txt, flags=re.IGNORECASE):
+            result.append(1)
+        else:
+            result.append(-1)
+    return result
+
+# metrics
+def compute_metrics(pred):
+    # predictions can be raw logits or token IDs; ensure we have IDs
+    preds = pred.predictions
+    if isinstance(preds, np.ndarray) and preds.ndim == 3:
+        preds = np.argmax(preds, axis=-1)
+
+    # decode to strings and normalize
+    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
+    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
+
+    # map any string containing 'biased' → 1, anything else → 0
+    y_pred = classify_preds(decoded_preds)
+    y_true = classify_preds(decoded_labels)
+
+    #  compute metrics
+    acc  = (np.array(y_true) == np.array(y_pred)).mean()
+    f1   = f1_score(y_true, y_pred, average="macro")
+    prec = precision_score(y_true, y_pred, average="macro")
+    rec  = recall_score(y_true, y_pred, average="macro")
+    na_pred = y_pred.count(-1)
+    na_lab = y_pred.count(-1)
+
+    return {
+        "accuracy": acc,
+        "f1_macro": f1,
+        "precision_macro": prec,
+        "recall_macro": rec,
+        "no_pred": na_pred,
+        "no_label": na_lab
+    }
+
 # data sampling utility
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=None):
     if random_state is None:
@@ -65,34 +122,6 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
     else:
         raise ValueError("Unsupported strategy.")
 
-# metrics
-def compute_metrics(pred):
-    # predictions can be raw logits or token IDs; ensure we have IDs
-    preds = pred.predictions
-    if isinstance(preds, np.ndarray) and preds.ndim == 3:
-        preds = np.argmax(preds, axis=-1)
-
-    # decode to strings and normalize
-    decoded_preds  = [p.strip().lower() for p in tokenizer.batch_decode(preds, skip_special_tokens=True)]
-    decoded_labels = [l.strip().lower() for l in tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)]
-
-    # map any string containing 'biased' → 1, anything else → 0
-    y_pred = [1 if 'biased' in p else 0 for p in decoded_preds]
-    y_true = [1 if 'biased' in l else 0 for l in decoded_labels]
-
-    #  compute metrics
-    acc  = (np.array(y_true) == np.array(y_pred)).mean()
-    f1   = f1_score(y_true, y_pred, average="macro")
-    prec = precision_score(y_true, y_pred, average="macro")
-    rec  = recall_score(y_true, y_pred, average="macro")
-
-    return {
-        "accuracy": acc,
-        "f1_macro": f1,
-        "precision_macro": prec,
-        "recall_macro": rec
-    }
-
 def preprocess(example, makeitwords=True):
     # tokenize inputs
     model_inputs = tokenizer(
@@ -109,34 +138,33 @@ def preprocess(example, makeitwords=True):
     model_inputs["labels"] = label_ids
     return model_inputs
 
-def preprocess_batch(batch):
-    # batch["text"] is a list of length B
-    # batch["label"] is a list of length B
-    # tokenize all texts in one go:
-    model_inputs = tokenizer(
-        batch["text"],
-        truncation=True,
-        padding="max_length",
-        max_length=512,
-    )
-    # build label sequences for each example
-    labels = []
-    for lab in batch["label"]:
-        label_str = "biased" if lab == 1 else "niet-biased"
-        lab_ids = tokenizer(
-            label_str,
-            truncation=True,
-            padding="max_length",
-            max_length=3,
-        )["input_ids"]
-        # mask padding tokens
-        lab_ids = [tok if tok != tokenizer.pad_token_id else -100
-                   for tok in lab_ids]
-        labels.append(lab_ids)
-
-    # add to the dict and return
-    model_inputs["labels"] = labels
-    return model_inputs
+# def preprocess_batch(batch):
+#     # batch["text"] is a list of length B
+#     # batch["label"] is a list of length B
+#     # tokenize all texts in one go:
+#     model_inputs = tokenizer(
+#         batch["text"],
+#         truncation=True,
+#         padding="max_length",
+#         max_length=512,
+#     )
+#     # build label sequences for each example
+#     labels = []
+#     for lab in batch["label"]:
+#         label_str = "biased" if lab == 1 else "niet-biased"
+#         lab_ids = tokenizer(
+#             label_str,
+#             truncation=True,
+#             padding="max_length",
+#             max_length=6,
+#         )["input_ids"]
+#         # mask padding tokens
+#         lab_ids = [tok if tok != tokenizer.pad_token_id else -100
+#                    for tok in lab_ids]
+#         labels.append(lab_ids)
+#     # add to the dict and return
+#     model_inputs["labels"] = labels
+#     return model_inputs
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha, device, gamma=2.0, ignore_index=-100):
@@ -203,7 +231,6 @@ if __name__ == "__main__":
     test_ds = dataset["test"]
 
     #the weights for the FL
-    weights = None
     if args.focal_loss:
         weights = compute_class_weight(
             class_weight="balanced",
@@ -213,23 +240,17 @@ if __name__ == "__main__":
         weight_tensor = torch.tensor(weights, device=model.device)
 
     tokenized_train = train_ds.map(
-        preprocess_batch,
-        batched=True,
-        batch_size=64,
+        preprocess,
         num_proc=8,
         remove_columns=train_ds.column_names,
     )
     tokenized_val = val_ds.map(
-        preprocess_batch,
-        batched=True,
-        batch_size=64,
+        preprocess,
         num_proc=8,
         remove_columns=val_ds.column_names,
     )
     tokenized_test = test_ds.map(
-        preprocess_batch,
-        batched=True,
-        batch_size=64,
+        preprocess,
         num_proc=8,
         remove_columns=test_ds.column_names,
     )
@@ -256,32 +277,39 @@ if __name__ == "__main__":
         report_to="none",
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
-        predict_with_generate=True,
-    )
+        predict_with_generate=True
+            )
 
-    if args.focal_loss  is True:
-        
-        trainer = Seq2SeqWithFocal(
-            model=model,
-            args=training_args,
-            train_dataset=tokenized_train,
-            eval_dataset=tokenized_val,
-            tokenizer=tokenizer,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
-            focal_alpha=weights.tolist(),
-            focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
-        )
-    else:
-        trainer = Seq2SeqTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=tokenized_train,
-            eval_dataset=tokenized_val,
-            tokenizer=tokenizer,
-            compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
-        )
+    # if args.focal_loss is True:
+    #     trainer = Seq2SeqWithFocal(
+    #         model=model,
+    #         args=training_args,
+    #         train_dataset=tokenized_train,
+    #         eval_dataset=tokenized_val,
+    #         tokenizer=tokenizer,
+    #         compute_metrics=compute_metrics,
+    #         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
+    #         focal_alpha=weights.tolist(),
+    #         focal_gamma=0,  # focusing parameter (set to 0 means just weighted CE )
+    #     )
+    # else:
+    data_collator = DataCollatorForSeq2Seq(
+    tokenizer=tokenizer,
+    model=model,
+    label_pad_token_id=-100,
+)
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_train,
+        eval_dataset=tokenized_val,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
+    )
+    print("Using Seq2SeqTrainer? ", not args.focal_loss)
+    print("Instantiating Trainer class:", type(trainer))
     print("Starting training...")
     trainer.train()
     print("Training complete.")
