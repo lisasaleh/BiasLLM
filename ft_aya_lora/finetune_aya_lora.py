@@ -118,36 +118,79 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
 
 
 # ---------- Metrics ----------
+def classify_answers(text_list):
+    """
+    Classify each text as:
+        1  if the last word is exactly "ja" (case-insensitive),
+        0  if the last word is exactly "nee" (case-insensitive),
+        -1  otherwise (invalid answer).
+
+    Parameters:
+        text_list: List of text strings.
+
+    Returns:
+        List of ints (1, 0, or -1) corresponding to each input string.
+    """
+    result = []
+    for text in text_list:
+        text = text.strip().lower()
+        last_word = text.split()[-1] if text.split() else ""
+        
+        if last_word == "ja":
+            result.append(1)
+        elif last_word == "nee":
+            result.append(0)
+        else:       
+            result.append(-1)
+
+    return result
+
 def compute_metrics(eval_pred):
     preds, labels = eval_pred
     labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    
+    # decode to text
     decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-    # extract 'ja' or 'nee' from the predictions:
-    # try to get the last word or check if 'ja' appears in the text
-    # if not, default to 'nee'
-    # NOTE: should this be stricter?
-    pred_labels = []
-    for p in decoded_preds:
-        p = p.strip().lower()
-        last_word = p.split()[-1] if p.split() else ""
-        if last_word == "ja" or "ja" in p:
-            pred_labels.append("ja")
-        elif last_word == "nee" or "nee" in p:
-            pred_labels.append("nee")
-        else:
-            pred_labels.append("nee")
     
-    # map the true labels to 'ja' and 'nee'
-    label_tokens = [l.strip().lower().split()[-1] if l.strip().split() else "" for l in decoded_labels]
+    # classify answers
+    pred_labels = classify_answers(decoded_preds)
+    true_labels = classify_answers(decoded_labels)
     
-    return {
-        "accuracy": accuracy_score(label_tokens, pred_labels),
-        "f1_macro": f1_score(label_tokens, pred_labels, pos_label="ja"),
-        "precision_macro": precision_score(label_tokens, pred_labels, average="macro"),
-        "recall_macro": recall_score(label_tokens, pred_labels, average="macro"),
+    # count invalid answers
+    invalid_preds = pred_labels.count(-1)
+    invalid_labels = true_labels.count(-1)
+    
+    # remove invalid answers for metric calculation
+    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
+                    if p != -1 and l != -1]
+    
+    if not valid_indices:
+        # if no valid predictions/labels, return all zeros
+        return {
+            "accuracy": 0.0,
+            "f1_macro": 0.0,
+            "precision_macro": 0.0,
+            "recall_macro": 0.0,
+            "invalid_preds_percent": 100.0 if pred_labels else 0.0,
+            "invalid_labels_percent": 100.0 if true_labels else 0.0
+        }
+    
+    # get valid predictions and corresponding true labels
+    valid_preds = [pred_labels[i] for i in valid_indices]
+    valid_labels = [true_labels[i] for i in valid_indices]
+    
+    # calculate metrics on valid predictions
+    metrics = {
+        "accuracy": accuracy_score(valid_labels, valid_preds),
+        "f1_macro": f1_score(valid_labels, valid_preds, pos_label=1),
+        "precision_macro": precision_score(valid_labels, valid_preds, average="macro"),
+        "recall_macro": recall_score(valid_labels, valid_preds, average="macro"),
+        "invalid_preds_percent": (invalid_preds / len(pred_labels) * 100) if pred_labels else 0.0,
+        "invalid_labels_percent": (invalid_labels / len(true_labels) * 100) if true_labels else 0.0
     }
+    
+    return metrics
 
 
 # -------------- Main --------------
@@ -161,10 +204,12 @@ if __name__ == "__main__":
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
 
+    model_dir = "/scratch-shared/scur1424/aya_models"
     model_name = "CohereLabs/aya-expanse-8b"
-
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    
     # ------- Load Tokenizer -------
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -190,7 +235,8 @@ if __name__ == "__main__":
 
     # ------- Load Model -------
     model = AutoModelForCausalLM.from_pretrained(
-        model_name,
+        # model_name,
+        model_dir,
         trust_remote_code=True,
         quantization_config=quantization_config,
         attn_implementation=attn_impl,
@@ -226,6 +272,8 @@ if __name__ == "__main__":
     train_df = pd.DataFrame(dataset["train"])
     sampled_train_df = sample_data(train_df, strategy=args.sampling)
     print(f"Sampling: {args.sampling} -> {len(sampled_train_df)} samples")
+    # take a sample of 10% for testing. TODO: remove this for final training
+    sampled_train_df = sampled_train_df.sample(frac=0.1, random_state=args.seed)
     train_ds = Dataset.from_pandas(sampled_train_df)
     test_ds = dataset["test"]
 
