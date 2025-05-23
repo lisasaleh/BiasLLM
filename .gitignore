@@ -1,3 +1,3 @@
 slurm_output_*.out
-
+.ipynb_checkpoints/
 ft_mt5/logs/
