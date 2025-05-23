@@ -30,6 +30,7 @@ def parse_args():
                    help="Early stopping patience")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--bare_model", action='store_true')
     return p.parse_args()
 
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=None):
@@ -169,17 +170,19 @@ if __name__ == "__main__":
         compute_metrics=compute_metrics_classification,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
     )
-    print("Starting training...")
-    trainer.train()
+    if args.bare_model is False:
+        print("Starting training...")
+        trainer.train()
     print("Training complete.")
     eval_metrics = trainer.evaluate()
     print(f"Best validation F1: {eval_metrics['eval_f1_macro']:.4f}")
-    abbrev = STRAT_ABBREV[args.sampling]
-    safe_name = model_name.replace("/", "-")
-    model_dir = f"{args.output_dir}/{safe_name}_clf_{abbrev}_f1_{args.sampling}_{eval_metrics['eval_f1_macro']:.4f}"
-    print(f"Model saved to {model_dir}")
-    model.encoder.save_pretrained(model_dir, safe_serialization=True)
-    tokenizer.save_pretrained(model_dir)
+    if args.bare_model is False:
+        abbrev = STRAT_ABBREV[args.sampling]
+        safe_name = model_name.replace("/", "-")
+        model_dir = f"{args.output_dir}/{safe_name}_clf_{abbrev}_f1_{args.sampling}_{eval_metrics['eval_f1_macro']:.4f}"
+        print(f"Model saved to {model_dir}")
+        model.encoder.save_pretrained(model_dir, safe_serialization=True)
+        tokenizer.save_pretrained(model_dir)
     test_pred = trainer.predict(tokenized_test)
     test_metrics = compute_metrics_classification(test_pred)
     print("Test metrics:", test_metrics) 
