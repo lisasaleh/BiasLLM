@@ -237,6 +237,8 @@ if __name__ == "__main__":
     for ds in (tokenized_train, tokenized_val, tokenized_test):
         ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
 
+    print(f"Number of examples in tokenized_train: {len(tokenized_train)}")
+
     # training arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=args.output_dir,
