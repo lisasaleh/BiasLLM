@@ -2,6 +2,9 @@ import os
 import argparse
 import random
 
+# For larger CUDA memory allocation (NOTE: has to be set before importing PyTorch)
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import numpy as np
 import pandas as pd
 import torch
@@ -10,7 +13,7 @@ from datasets import load_dataset, Dataset
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig, EarlyStoppingCallback, TrainerCallback
-from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
+from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
 # ---------- Constants & Defaults ----------
@@ -21,7 +24,7 @@ STRAT_ABBREV = {
     "normal":      "nm",
 }
 
-TRAIN_MAX_SEQ_LENGTH = 256  # reduced from 512 to save memory
+TRAIN_MAX_SEQ_LENGTH = 512  # reduce to 256 to save memory
 DEFAULT_QUANTIZE_4BIT = True
 DEFAULT_FLASH_ATTENTION = True 
 DEFAULT_GRAD_ACC_STEPS = 4  # increased to reduce memory usage
@@ -33,11 +36,15 @@ def parse_args():
     p = argparse.ArgumentParser("Fine-tune Aya for bias detection using LoRA")
     # data & optimization
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--sampling", choices=STRAT_ABBREV, default="undersample")
-    p.add_argument("--loss_type", type=str, choices=["standard", "weighted", "focal"], default="standard", 
-                   help="Loss function type: standard CE, weighted CE, or focal loss")
-    p.add_argument("--focal_gamma", type=float, default=2.0, 
-                   help="Gamma parameter for focal loss (higher value = more focus on hard examples)")
+    p.add_argument("--sampling", choices=list(STRAT_ABBREV.keys()), default="normal")
+    p.add_argument("--loss_type", type=str, 
+                    choices=["standard", "weighted", "focal"], 
+                    default="standard", 
+                    help="Loss function type: standard CE, weighted CE, or focal loss")
+    p.add_argument("--focal_gamma", 
+                    type=float, 
+                    default=2.0, 
+                    help="Gamma parameter for focal loss (higher value = more focus on hard examples)")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--bs", type=int, default=8, help="per-device train batch size")
@@ -314,7 +321,6 @@ class WeightedCrossEntropyLoss(nn.Module):
         loss = loss_fct(flat_logits, flat_labels)
         return loss
 
-
 # ---------- Focal Loss Implementation ----------
 class FocalLoss(nn.Module):
     """
@@ -417,7 +423,7 @@ class ClassificationMetricsCallback(TrainerCallback):
         if logs is None:
             return
             
-        # Remove token accuracy metrics that aren't relevant for our classification task
+        # Remove token accuracy metrics that aren't relevant for classification task
         for key in list(logs.keys()):
             if "accuracy" in key and "eval" not in key:
                 logs.pop(key, None)
@@ -457,7 +463,7 @@ class WeightedSFTTrainer(SFTTrainer):
                 eval_dataset=self.eval_dataset
             ))
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         Override to use weighted loss
         """
@@ -493,7 +499,7 @@ class FocalSFTTrainer(SFTTrainer):
                 eval_dataset=self.eval_dataset
             ))
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         Override to use focal loss
         """
@@ -504,8 +510,6 @@ class FocalSFTTrainer(SFTTrainer):
         
         return (loss, outputs) if return_outputs else loss
 
-
-# ---------- Custom Trainer Callback ----------
 class MetricsLoggerCallback(TrainerCallback):
     """
     Custom callback to log classification metrics (accuracy, F1, precision, recall) 
@@ -524,8 +528,9 @@ class MetricsLoggerCallback(TrainerCallback):
         print("=============================\n")
 
 
+# ---------- Print Loss Comparison ----------
 def print_loss_comparison(loss_type, test_metrics):
-    """Print a formatted comparison of this loss type's performance."""
+    """Print a formatted comparison of given loss type's performance."""
     print(f"\n{'=' * 50}")
     print(f"LOSS TYPE: {loss_type.upper()}")
     if loss_type == "focal":
@@ -578,7 +583,6 @@ if __name__ == "__main__":
             print("Successfully loaded Flash Attention 2.")
         except ImportError:
             print("WARNING: flash_attn not installed; disabling FlashAttention2.")
-            print("Can install with: pip install flash-attn --no-build-isolation")
             attn_impl = None
 
     # ---------- Load Model ----------
@@ -681,8 +685,8 @@ if __name__ == "__main__":
         # Optimizer settings
         learning_rate=args.lr,
         weight_decay=args.wd,
-        fp16=False, 
-        bf16=False,
+        fp16=False,  # use float16 for training
+        bf16=False,  # use bfloat16 for training
         warmup_ratio=0.05,
         group_by_length=True,
         lr_scheduler_type="constant",
@@ -765,14 +769,14 @@ if __name__ == "__main__":
     print("Training complete")
     
     # ---------- Evaluate ---------
-    print("\n===== VALIDATION SET EVALUATION =====")
-    val_metrics = trainer.evaluate()
-    best_f1 = val_metrics["eval_f1_macro"]
-    print(f"Best validation F1: {best_f1:.4f}")
-    print(f"Validation metrics: {val_metrics}")
+    # print("\n===== VALIDATION SET EVALUATION =====")
+    # val_metrics = trainer.evaluate()
+    # best_f1 = val_metrics["eval_f1_macro"]
+    # print(f"Best validation F1: {best_f1:.4f}")
+    # print(f"Validation metrics: {val_metrics}")
     
     # ---------- Save ---------
-    abbrev = STRAT_ABBREV[args.sampling]
+    sampling_abbrev = STRAT_ABBREV[args.sampling]
     
     # Add loss type to model name
     loss_abbrev = ""
@@ -781,33 +785,33 @@ if __name__ == "__main__":
     elif args.loss_type == "focal":
         loss_abbrev = f"_FL{args.focal_gamma}"  # FL for Focal Loss with gamma value
     
-    save_name = model_name.replace("/", "-")
-    model_dir = f"{args.output_dir}/{save_name}{loss_abbrev}_{abbrev}_f1_{best_f1:.4f}"
+    save_name = "aya-expanse-8b"
+    model_dir = f"{args.output_dir}/{save_name}_{loss_abbrev}_{sampling_abbrev}"  #_f1_{best_f1:.4f}"
     
     model.save_pretrained(model_dir)
     tokenizer.save_pretrained(os.path.join(model_dir, "tokenizer"))
     print(f"Model saved to {model_dir}")
 
-    # ---------- Test Metrics ----------
-    print("\n===== TEST SET EVALUATION =====")
-    test_pred = trainer.predict(tokenized_test)
-    test_metrics = compute_metrics(test_pred)
+    # # ---------- Test Metrics ----------
+    # print("\n===== TEST SET EVALUATION =====")
+    # test_pred = trainer.predict(tokenized_test)
+    # test_metrics = compute_metrics(test_pred)
     
-    # Print formatted metrics comparison
-    print_loss_comparison(args.loss_type, test_metrics)
+    # # Print formatted metrics comparison
+    # print_loss_comparison(args.loss_type, test_metrics)
     
-    # Save test metrics to the model directory
-    metrics_file = os.path.join(model_dir, "test_metrics.txt")
-    with open(metrics_file, "w") as f:
-        f.write(f"Loss Type: {args.loss_type}\n")
-        if args.loss_type == "focal":
-            f.write(f"Focal Gamma: {args.focal_gamma}\n")
-        f.write(f"Sampling Strategy: {args.sampling}\n\n")
-        for key, value in test_metrics.items():
-            f.write(f"{key}: {value}\n")
+    # # Save test metrics to the model directory
+    # metrics_file = os.path.join(model_dir, "test_metrics.txt")
+    # with open(metrics_file, "w") as f:
+    #     f.write(f"Loss Type: {args.loss_type}\n")
+    #     if args.loss_type == "focal":
+    #         f.write(f"Focal Gamma: {args.focal_gamma}\n")
+    #     f.write(f"Sampling Strategy: {args.sampling}\n\n")
+    #     for key, value in test_metrics.items():
+    #         f.write(f"{key}: {value}\n")
     
-    print(f"Test metrics saved to {metrics_file}")
+    # print(f"Test metrics saved to {metrics_file}")
     
-    # ---------- Loss Comparison ----------
-    if args.loss_type in ["weighted", "focal"]:
-        print_loss_comparison(args.loss_type, test_metrics)
+    # # ---------- Loss Comparison ----------
+    # if args.loss_type in ["weighted", "focal"]:
+    #     print_loss_comparison(args.loss_type, test_metrics)

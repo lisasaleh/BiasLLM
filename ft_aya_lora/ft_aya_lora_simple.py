@@ -2,13 +2,16 @@ import os
 import argparse
 import random
 
+# Set CUDA memory allocation configuration before importing PyTorch
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
 import numpy as np
 import pandas as pd
 import torch
 from datasets import load_dataset, Dataset
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig, EarlyStoppingCallback
-from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig
+from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
 # ---------- Constants & Defaults ----------
@@ -19,7 +22,7 @@ STRAT_ABBREV = {
     "normal":      "nm",
 }
 
-TRAIN_MAX_SEQ_LENGTH = 256  # reduced from 512 to save memory
+TRAIN_MAX_SEQ_LENGTH = 512  # reduce to 256 to save memory
 DEFAULT_QUANTIZE_4BIT = True
 DEFAULT_FLASH_ATTENTION = True 
 DEFAULT_GRAD_ACC_STEPS = 4  # increased to reduce memory usage
@@ -31,18 +34,22 @@ def parse_args():
     p = argparse.ArgumentParser("Fine-tune Aya for bias detection using LoRA")
     # data & optimization
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--sampling", choices=STRAT_ABBREV, default="undersample")
-    p.add_argument("--focal_loss", action="store_true")
+    p.add_argument("--sampling", choices=list(STRAT_ABBREV.keys()), default="normal",
+                        help="Sampling strategy for the dataset.")
     p.add_argument("--epochs", type=int, default=12)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--bs", type=int, default=8, help="per-device train batch size")
     p.add_argument("--wd", type=float, default=0.0, help="weight decay")
     p.add_argument("--patience", type=int, default=2, help="early stop patience")
     p.add_argument("--output_dir", type=str, default="./results_aya_lora")
+    p.add_argument("--weighted_loss", action="store_true", default=False, help="Use weighted loss to balance biased and unbiased classes")
 
     # LoRA hyperparams
-    p.add_argument("--lora_r", type=int, default=16)
-    p.add_argument("--lora_alpha", type=int, default=32)
+    p.add_argument("--lora_r", type=int, default=8)             # rank: nb of params in adaptation layers
+                                                                # (more -> remembers better -> can learn more complex things)
+    p.add_argument("--lora_alpha", type=int, default=16)        # scaling factor of adaptation layers weights
+                                                                # (higher -> LoRA layers have more influence on base model)
+                                                                # usually set to double the rank
     p.add_argument("--lora_dropout", type=float, default=0.1)
     p.add_argument(
         "--lora_bias",
@@ -83,6 +90,7 @@ def parse_args():
     )
 
     return p.parse_args()
+
 
 # ---------- Data Sampling ----------
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=42):
@@ -214,6 +222,10 @@ def compute_metrics(eval_pred):
     # log information about invalid predictions
     print(f"Invalid predictions: {invalid_preds}/{len(pred_labels)} ({invalid_preds/max(1,len(pred_labels))*100:.2f}%)")
     
+    # get indices of samples with valid predictions and labels
+    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
+                    if p != -1 and l != -1]
+    
     # handle case with no valid predictions
     if not valid_indices:
         print("No valid predictions/labels found!")
@@ -225,10 +237,6 @@ def compute_metrics(eval_pred):
             "invalid_preds_percent": 100.0 if pred_labels else 0.0,
             "invalid_labels_percent": 100.0 if true_labels else 0.0
         }
-    
-    # get indices of samples with valid predictions and labels
-    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
-                    if p != -1 and l != -1]
 
     # extract valid predictions and labels
     valid_preds = [pred_labels[i] for i in valid_indices]
@@ -291,7 +299,6 @@ if __name__ == "__main__":
             print("Successfully loaded Flash Attention 2.")
         except ImportError:
             print("WARNING: flash_attn not installed; disabling FlashAttention2.")
-            print("Can install with: pip install flash-attn --no-build-isolation")
             attn_impl = None
 
     # ------- Load Model -------
@@ -373,10 +380,23 @@ if __name__ == "__main__":
         per_device_train_batch_size=args.bs,
         gradient_accumulation_steps=args.grad_acc_steps,
         gradient_checkpointing=args.use_grad_checkpointing,
-        optim="paged_adamw_32bit",  # OR adamw_torch_fused
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # more memory efficient
+        optim="paged_adamw_8bit",  # more memory efficient optimizer
+        # checkpoint saving
+        save_strategy="steps",
         save_steps=50,
+        save_total_limit=1,
+        # evaluation & best model (for early stopping)
+        # eval_strategy="steps",
+        # metric_for_best_model="f1_macro",
+        # greater_is_better=True,
+        # load_best_model_at_end=True,
+        eval_accumulation_steps=10,  # accumulate eval loss over 10 steps
+        # logging
         logging_steps=10,
         logging_dir=os.path.join(args.output_dir, "logs"),
+        report_to="none",
+        # optimization
         learning_rate=args.lr,
         weight_decay=args.wd,
         fp16=False,  # Use bfloat16 for training
@@ -384,10 +404,6 @@ if __name__ == "__main__":
         warmup_ratio=0.05,
         group_by_length=True,
         lr_scheduler_type="constant",
-        report_to="none",
-        load_best_model_at_end=True,
-        metric_for_best_model="f1_macro",
-        greater_is_better=True,
         dataloader_pin_memory=False,  # Reduces CPU memory usage
     )
 
@@ -400,7 +416,7 @@ if __name__ == "__main__":
         train_dataset=tokenized_train,
         eval_dataset=tokenized_eval,
         compute_metrics=compute_metrics,
-        label_names=["input_ids"],
+        # label_names=["input_ids"],
         # callbacks=callbacks,
     )
 
@@ -408,22 +424,24 @@ if __name__ == "__main__":
     trainer.train()
     print("Training complete")
     
-    # ---------- Evaluate ---------
-    metrics = trainer.evaluate()
-    best_f1 = metrics["eval_f1_macro"]
-    print(f"Best validation F1: {best_f1:.4f}")
+    # # ---------- Evaluate ---------
+    # print("\n===== VALIDATION SET EVALUATION =====")
+    # metrics = trainer.evaluate()
+    # best_f1 = metrics["eval_f1_macro"]
+    # print(f"Best validation F1: {best_f1:.4f}")
     
     # ---------- Save ---------
-    abbrev = STRAT_ABBREV[args.sampling]
-    fe = "_FE" if args.focal_loss else ""
-    save_name = model_name.replace("/", "-")
-    model_dir = f"{args.output_dir}/{save_name}{fe}_{abbrev}_f1_{best_f1:.4f}"
+    sampling_abbrev = STRAT_ABBREV[args.sampling]
     
+    save_name = "aya-expanse-8b"
+    model_dir = f"{args.output_dir}/{save_name}_{sampling_abbrev}"  #_f1_{best_f1:.4f}"
+
     model.save_pretrained(model_dir)
     tokenizer.save_pretrained(os.path.join(model_dir, "tokenizer"))
     print(f"Model saved to {model_dir}")
     
-    # ---------- Test Metrics ----------
-    test_pred = trainer.predict(tokenized_test)
-    test_metrics = compute_metrics(test_pred)
-    print("Test metrics:", test_metrics)
+    # # ---------- Test Metrics ----------
+    # print("\n===== TEST SET EVALUATION =====")
+    # test_pred = trainer.predict(tokenized_test)
+    # test_metrics = compute_metrics(test_pred)
+    # print("Test metrics:", test_metrics)
