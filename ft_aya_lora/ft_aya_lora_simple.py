@@ -23,6 +23,7 @@ TRAIN_MAX_SEQ_LENGTH = 256  # reduced from 512 to save memory
 DEFAULT_QUANTIZE_4BIT = True
 DEFAULT_FLASH_ATTENTION = True 
 DEFAULT_GRAD_ACC_STEPS = 4  # increased to reduce memory usage
+USE_GRAD_CHECKPOINTING = True  # enable gradient checkpointing to save memory
 
 
 # ---------- Argument Parser ----------
@@ -70,6 +71,11 @@ def parse_args():
         help="Use FlashAttention2 (requires flash-attn installed)",
     )
     p.add_argument(
+        "--use_grad_checkpointing", 
+        action="store_true", 
+        default=USE_GRAD_CHECKPOINTING
+    )
+    p.add_argument(
         "--grad_acc_steps",
         type=int,
         default=DEFAULT_GRAD_ACC_STEPS,
@@ -114,59 +120,103 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
         return df
 
     else:
-        raise ValueError("Unsupported strategy.")
+        raise ValueError("Unsupported strategy.")
+
+def preprocess(example):
+    """
+    Preprocess an example for training/evaluation.
+    
+    Converts the numeric label (0/1) to the textual format ("ja"/"nee") that the model will generate,
+    then tokenizes the input and target, and creates the appropriate input_ids, attention_mask, and labels.
+    """
+    # complete the prompt with the example text
+    prompt = prompt_template.format(text=example["text"])
+    
+    # convert binary label (0/1) to the text format "ja"/"nee" that the model will generate
+    target = "ja" if example["label"] == 1 else "nee"
+    
+    # tokenize the prompt and target (separately)
+    prompt_tokens = tokenizer(prompt, truncation=True, max_length=TRAIN_MAX_SEQ_LENGTH, add_special_tokens=False)
+    target_tokens = tokenizer(target, truncation=True, max_length=5, add_special_tokens=False)
+    
+    # combine tokenized prompt and target
+    input_ids = prompt_tokens["input_ids"] + target_tokens["input_ids"]
+    attn_mask = prompt_tokens["attention_mask"] + target_tokens["attention_mask"]
+    
+    # for causal LM training, we only want to predict the target tokens, not the prompt tokens
+    # -100 is the ignore index for the loss function 
+    labels = [-100] * len(prompt_tokens["input_ids"]) + target_tokens["input_ids"]
+    
+    # truncate sequences to maximum length
+    input_ids = input_ids[:TRAIN_MAX_SEQ_LENGTH]
+    attn_mask = attn_mask[:TRAIN_MAX_SEQ_LENGTH]
+    labels = labels[:TRAIN_MAX_SEQ_LENGTH]
+    
+    return {
+        "input_ids": input_ids, 
+        "attention_mask": attn_mask, 
+        "labels": labels
+    }
 
 
 # ---------- Metrics ----------
 def classify_answers(text_list):
     """
-    Classify each text as:
+    Classify each example sentence as:
         1  if the last word is exactly "ja" (case-insensitive),
         0  if the last word is exactly "nee" (case-insensitive),
         -1  otherwise (invalid answer).
 
     Parameters:
-        text_list: List of text strings.
+        text_list: List of text strings (generated outputs).
 
     Returns:
         List of ints (1, 0, or -1) corresponding to each input string.
     """
-    result = []
+    preds = []
     for text in text_list:
-        text = text.strip().lower()
-        last_word = text.split()[-1] if text.split() else ""
+        words = text.strip().lower().split()
         
-        if last_word == "ja":
-            result.append(1)
-        elif last_word == "nee":
-            result.append(0)
-        else:       
-            result.append(-1)
+        # if the last word is "ja" or "nee", classify as 1 or 0 respectively, otherwise as invalid          
+        if words[-1] == "ja":
+            preds.append(1)  # biased
+        elif words[-1] == "nee":
+            preds.append(0)  # not biased
+        else:
+            preds.append(-1)  # invalid answer
 
-    return result
+    return preds
 
 def compute_metrics(eval_pred):
     preds, labels = eval_pred
     labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
     
-    # decode to text
+    # decode predictions and labels to text
     decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
     
-    # classify answers
+    # print a few examples for debugging
+    if len(decoded_preds) > 0:
+        print("\nExample predictions:")
+        for i in range(min(3, len(decoded_preds))):
+            print(f"Pred {i}: '{decoded_preds[i]}'")
+            if i < len(decoded_labels):
+                print(f"Label {i}: '{decoded_labels[i]}'")
+    
+    # convert text to numeric labels (1, 0, -1)
     pred_labels = classify_answers(decoded_preds)
     true_labels = classify_answers(decoded_labels)
     
-    # count invalid answers
+    # count invalid predictions/labels
     invalid_preds = pred_labels.count(-1)
     invalid_labels = true_labels.count(-1)
     
-    # remove invalid answers for metric calculation
-    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
-                    if p != -1 and l != -1]
+    # log information about invalid predictions
+    print(f"Invalid predictions: {invalid_preds}/{len(pred_labels)} ({invalid_preds/max(1,len(pred_labels))*100:.2f}%)")
     
+    # handle case with no valid predictions
     if not valid_indices:
-        # if no valid predictions/labels, return all zeros
+        print("No valid predictions/labels found!")
         return {
             "accuracy": 0.0,
             "f1_macro": 0.0,
@@ -176,20 +226,29 @@ def compute_metrics(eval_pred):
             "invalid_labels_percent": 100.0 if true_labels else 0.0
         }
     
-    # get valid predictions and corresponding true labels
+    # get indices of samples with valid predictions and labels
+    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
+                    if p != -1 and l != -1]
+
+    # extract valid predictions and labels
     valid_preds = [pred_labels[i] for i in valid_indices]
     valid_labels = [true_labels[i] for i in valid_indices]
     
-    # calculate metrics on valid predictions
+    # Calculate binary classification metrics
     metrics = {
         "accuracy": accuracy_score(valid_labels, valid_preds),
-        "f1_macro": f1_score(valid_labels, valid_preds, pos_label=1),
-        "precision_macro": precision_score(valid_labels, valid_preds, average="macro"),
-        "recall_macro": recall_score(valid_labels, valid_preds, average="macro"),
+        "f1_macro": f1_score(valid_labels, valid_preds, pos_label=1, average='macro'),
+        "precision_macro": precision_score(valid_labels, valid_preds, pos_label=1, average='macro'),
+        "recall_macro": recall_score(valid_labels, valid_preds, pos_label=1, average='macro'),
         "invalid_preds_percent": (invalid_preds / len(pred_labels) * 100) if pred_labels else 0.0,
         "invalid_labels_percent": (invalid_labels / len(true_labels) * 100) if true_labels else 0.0
     }
     
+    # log counts of class distribution in valid predictions
+    pos_preds = valid_preds.count(1)
+    neg_preds = valid_preds.count(0)
+    print(f"Valid predictions: #positive={pos_preds}, #negative={neg_preds}")
+
     return metrics
 
 
@@ -204,12 +263,12 @@ if __name__ == "__main__":
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
 
-    model_dir = "/scratch-shared/scur1424/aya_models"
+    # model_dir = "/scratch-shared/scur1424/aya_models"
+    # tokenizer = AutoTokenizer.from_pretrained(model_dir)
     model_name = "CohereLabs/aya-expanse-8b"
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
     
     # ------- Load Tokenizer -------
-    # tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -220,7 +279,7 @@ if __name__ == "__main__":
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=torch.bfloat16,  # NOTE: Vera said this conflicts with 4bit quantizing
         )
 
     # ------- FlashAttention Fallback -------
@@ -229,21 +288,36 @@ if __name__ == "__main__":
         try:
             import flash_attn  # noqa: F401
             attn_impl = "flash_attention_2"
+            print("Successfully loaded Flash Attention 2.")
         except ImportError:
-            print("ATT: flash_attn not installed; disabling FlashAttention2.")
+            print("WARNING: flash_attn not installed; disabling FlashAttention2.")
+            print("Can install with: pip install flash-attn --no-build-isolation")
             attn_impl = None
 
     # ------- Load Model -------
-    model = AutoModelForCausalLM.from_pretrained(
-        # model_name,
-        model_dir,
-        trust_remote_code=True,
-        quantization_config=quantization_config,
-        attn_implementation=attn_impl,
-        device_map="auto",
-        torch_dtype=torch.bfloat16,
-        use_cache=False,  # Disable KV cache for training to save memory
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            # model_dir,
+            trust_remote_code=True,
+            quantization_config=quantization_config,
+            attn_implementation=attn_impl,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            use_cache=False,  # disable KV cache for training to save memory
+        )
+    except Exception as e:
+        print(f"Error loading with 4-bit quantization: {e}")
+        print("Trying to load with default precision...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            # model_dir,
+            trust_remote_code=True,
+            attn_implementation=attn_impl,
+            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            use_cache=False,
+        )
     
     if args.quantize_4bit:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
@@ -260,8 +334,8 @@ if __name__ == "__main__":
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         bias=args.lora_bias,
-        task_type=TaskType.CAUSAL_LM,
-        target_modules=target_modules,
+        task_type="CAUSAL_LM",
+        target_modules=target_modules,  # ["q_proj", "v_proj", "k_proj", "o_proj"]
     )
     
     model = get_peft_model(model, lora_config)
@@ -272,9 +346,8 @@ if __name__ == "__main__":
     train_df = pd.DataFrame(dataset["train"])
     sampled_train_df = sample_data(train_df, strategy=args.sampling)
     print(f"Sampling: {args.sampling} -> {len(sampled_train_df)} samples")
-    # take a sample of 10% for testing. TODO: remove this for final training
-    sampled_train_df = sampled_train_df.sample(frac=0.1, random_state=args.seed)
     train_ds = Dataset.from_pandas(sampled_train_df)
+    eval_ds = dataset["validation"]
     test_ds = dataset["test"]
 
     # ---------- Prompt & Preprocess ----------
@@ -289,77 +362,67 @@ if __name__ == "__main__":
         'De zin is: "{text}"'
     )
 
-    def preprocess(example):
-        prompt = prompt_template.format(text=example["text"])
-        # Convert binary label to "ja" or "nee"
-        target = "ja" if example["label"] == 1 else "nee"
-        pt = tokenizer(prompt, truncation=True, max_length=TRAIN_MAX_SEQ_LENGTH, add_special_tokens=False)
-        tt = tokenizer(target, truncation=True, max_length=5, add_special_tokens=False)
-        input_ids = pt["input_ids"] + tt["input_ids"]
-        attn_mask = pt["attention_mask"] + tt["attention_mask"]
-        labels = [-100] * len(pt["input_ids"]) + tt["input_ids"]
-        # truncate
-        input_ids = input_ids[:TRAIN_MAX_SEQ_LENGTH]
-        attn_mask = attn_mask[:TRAIN_MAX_SEQ_LENGTH]
-        labels = labels[:TRAIN_MAX_SEQ_LENGTH]
-        return {"input_ids": input_ids, "attention_mask": attn_mask, "labels": labels}
-
     tokenized_train = train_ds.map(preprocess, remove_columns=train_ds.column_names, batched=False)
+    tokenized_eval = eval_ds.map(preprocess, remove_columns=eval_ds.column_names, batched=False)
     tokenized_test = test_ds.map(preprocess, remove_columns=test_ds.column_names, batched=False)
 
     # ------- Training Arguments -------
     training_args = TrainingArguments(
         output_dir=args.output_dir,
+        num_train_epochs=args.epochs,
         per_device_train_batch_size=args.bs,
         gradient_accumulation_steps=args.grad_acc_steps,
-        num_train_epochs=args.epochs,
+        gradient_checkpointing=args.use_grad_checkpointing,
+        optim="paged_adamw_32bit",  # OR adamw_torch_fused
+        save_steps=50,
+        logging_steps=10,
+        logging_dir=os.path.join(args.output_dir, "logs"),
         learning_rate=args.lr,
         weight_decay=args.wd,
-        logging_dir=os.path.join(args.output_dir, "logs"),
-        logging_strategy="epoch",
-        eval_strategy="epoch",
-        save_strategy="epoch",
+        fp16=False,  # Use bfloat16 for training
+        bf16=True,
+        warmup_ratio=0.05,
+        group_by_length=True,
+        lr_scheduler_type="constant",
+        report_to="none",
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
         greater_is_better=True,
-        fp16=True,
-        gradient_checkpointing=True,
-        # Memory optimization
-        optim="adamw_torch_fused",  # Use fused optimizer if available
-        ddp_find_unused_parameters=False,
         dataloader_pin_memory=False,  # Reduces CPU memory usage
     )
 
     # ---------- Trainer & Train ----------
-    callbacks = [EarlyStoppingCallback(early_stopping_patience=args.patience)]
+    # callbacks = [EarlyStoppingCallback(early_stopping_patience=args.patience)]
     
     trainer = SFTTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
-        eval_dataset=tokenized_test,
+        eval_dataset=tokenized_eval,
         compute_metrics=compute_metrics,
         label_names=["input_ids"],
-        callbacks=callbacks,
+        # callbacks=callbacks,
     )
 
     print("Starting training")
     trainer.train()
     print("Training complete")
-
-    # ---------- Evaluation & Save ----------
+    
+    # ---------- Evaluate ---------
     metrics = trainer.evaluate()
     best_f1 = metrics["eval_f1_macro"]
     print(f"Best validation F1: {best_f1:.4f}")
-
+    
+    # ---------- Save ---------
     abbrev = STRAT_ABBREV[args.sampling]
     fe = "_FE" if args.focal_loss else ""
     save_name = model_name.replace("/", "-")
     model_dir = f"{args.output_dir}/{save_name}{fe}_{abbrev}_f1_{best_f1:.4f}"
+    
     model.save_pretrained(model_dir)
     tokenizer.save_pretrained(os.path.join(model_dir, "tokenizer"))
     print(f"Model saved to {model_dir}")
-
+    
     # ---------- Test Metrics ----------
     test_pred = trainer.predict(tokenized_test)
     test_metrics = compute_metrics(test_pred)

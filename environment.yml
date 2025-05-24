@@ -7,9 +7,11 @@ channels:
 dependencies:
   - python=3.10.12
   - pip=23.2.1
-  - pytorch=2.0.1
-  - cudatoolkit=11.7
+  # - pytorch>=2.2
+  # - pytorch-cuda=11.7
+  # - cudatoolkit=11.7
   - pip:
+      - torch
       - transformers==4.51.3
       - huggingface_hub>=0.16.4
       - safetensors
@@ -22,12 +24,11 @@ dependencies:
       - pytest==7.4.0
       - tokenizers==0.21.1
       - datasets==3.6.0
-      - numpy>=1.24.0
+      - numpy==1.24.0
       - sentencepiece
       - evaluate
       - scikit-learn==1.6.1
       - pandas
       - trl
-      - wandb
-      - flash-attn
+      # - flash-attn (--no-build-isolation)
 
