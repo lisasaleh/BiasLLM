@@ -23,24 +23,27 @@ MODELS_DIR="./aya_saved_models/"
 # Create output directory if it doesn't exist
 mkdir -p $MODELS_DIR
 
-RESULTS_DIR="./aya_eval_results/"
+RESULTS_DIR="./aya_eval_results_strict/"
 # Create output directory if it doesn't exist
 mkdir -p $RESULTS_DIR
 
-# Train models with different sampling strategies
-for sampling in "undersample" "oversample" "balanced" "normal"; do
-    echo "Training with sampling strategy: $sampling"
-    python ft_aya_lora_simple.py \
-        --seed 42 \
-        --sampling $sampling \
-        --epochs 10 \
-        --bs 4 \
-        --lora_r 8 \
-        --lora_alpha 16 \
-        --output_dir $MODELS_DIR
-done
+SEED=42
 
-echo "All models trained and saved in $MODELS_DIR"
+# # Train models with different sampling strategies
+# for sampling in "undersample" "oversample" "balanced" "normal"; do
+#     echo "Training with sampling strategy: $sampling"
+#     python ft_aya_lora_simple.py \
+#         --seed $SEED \
+#         --sampling $sampling \
+#         --epochs 10 \
+#         --bs 4 \
+#         --lora_r 8 \
+#         --lora_alpha 16 \
+#         --output_dir $MODELS_DIR
+# done
+
+# echo "All models trained and saved in $MODELS_DIR"
+
 echo "Starting evaluation of saved models..."
 
 # Evaluate all saved models
@@ -48,7 +51,7 @@ for checkpoint in $MODELS_DIR/aya-expanse-8b_*; do
     echo "Evaluating checkpoint: $checkpoint"
     python eval_ckpt.py \
         --checkpoint_path "$checkpoint" \
-        --max_samples 50 \
+        --seed $SEED \
         --bs 1 \
         --quantize_4bit \
         --output_dir $RESULTS_DIR

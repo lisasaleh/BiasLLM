@@ -29,7 +29,6 @@ for checkpoint in $MODELS_DIR/aya-expanse-8b_*; do
     echo "Evaluating checkpoint: $checkpoint"
     python eval_ckpt.py \
         --checkpoint_path "$checkpoint" \
-        --max_samples 50 \
         --bs 1 \
         --quantize_4bit \
         --output_dir $RESULTS_DIR

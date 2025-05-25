@@ -33,7 +33,8 @@ TRAIN_MAX_SEQ_LENGTH = 512
 # ---------- Argument Parser ----------
 def parse_args():
     p = argparse.ArgumentParser("Evaluate Aya LoRA checkpoint for bias detection - Fixed Version")
-    p.add_argument("--checkpoint_path", type=str, default="./results_aya_lora/checkpoint-725")
+    p.add_argument("--checkpoint_path", type=str)
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--bs", type=int, default=1, help="batch size - keep at 1 for memory")
     p.add_argument("--output_dir", type=str, default="./results_aya_lora")
     p.add_argument("--max_samples", type=int, default=None, help="Limit number of samples for testing")
@@ -65,64 +66,39 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
         raise ValueError("Unsupported strategy.")
 
 def classify_answer(text):
-    """Classify the answer text as 'ja' (1), 'nee' (0), or invalid (-1)."""
+    """Classify the answer text as 'ja' (1), 'nee' (0), or invalid (-1).
+    
+    Only accepts exact matches of 'ja' or 'nee' (case-insensitive) with optional trailing punctuation.
+    """
     
     print(f"Classifying text: '{text}'")
     
     # Check if text is empty or not a string -> invalid
     if not text or not isinstance(text, str):
+        print("Text is empty or not a string -> invalid")
         return -1
     
-    # Clean the text
+    # Clean the text - remove leading/trailing whitespace
     text = text.strip().lower()
-    text = text.strip('"\'.,!?()[]')
-    words = [w.strip() for w in text.split() if w.strip()]
     
-    if not words:
+    # Remove trailing punctuation (if any)
+    while text and text[-1] in '.,!?;:"\')]}»':
+        text = text[:-1]
+    
+    # # Remove leading punctuation (if any)
+    # while text and text[0] in '"\'{([':
+    #     text = text[1:]
+    
+    # After cleaning, the text should be exactly "ja" or "nee"
+    if text == "ja":
+        # print("Exact match: 'ja' -> 1")
+        return 1
+    elif text == "nee":
+        # print("Exact match: 'nee' -> 0") 
+        return 0
+    else:
+        print(f"No exact match found for '{text}' -> invalid")
         return -1
-    
-    # Check last word
-    last_word = words[-1].strip('.,!?"\'')
-    if last_word == "ja":
-        print("last word is 'ja'")
-        return 1
-    elif last_word == "nee":
-        print("last word is 'nee'")
-        return 0
-
-    # Check last few words for patterns
-    last_few = ' '.join(words[-3:]) if len(words) >= 3 else ' '.join(words)
-    if 'ja' in last_few and 'nee' not in last_few:
-        print("last few words contain 'ja' but not 'nee'")
-        return 1
-    elif 'nee' in last_few and 'ja' not in last_few:
-        print("last few words contain 'nee' but not 'ja'")
-        return 0
-
-    # Find ja/nee anywhere, but prefer towards the end
-    ja_positions = [i for i, word in enumerate(words) if 'ja' in word.lower()]
-    nee_positions = [i for i, word in enumerate(words) if 'nee' in word.lower()]
-    
-    # If only one type appears
-    if ja_positions and not nee_positions:
-        print("only 'ja' found in text")
-        return 1
-    elif nee_positions and not ja_positions:
-        print("only 'nee' found in text")
-        return 0
-    
-    # If both appear, prefer the one that appears later
-    if ja_positions and nee_positions:
-        last_ja = max(ja_positions)
-        last_nee = max(nee_positions)
-        if last_ja > last_nee:
-            print("both found, 'ja' appears later")
-            return 1
-        else:
-            print("both found, 'nee' appears later")
-            return 0
-
-    return -1
 
 def evaluate_model_generation(model, tokenizer, dataset, prompt_template, max_samples=None):
     """Evaluate model using generation instead of trainer.evaluate()."""
