@@ -14,7 +14,7 @@ module load Anaconda3/2023.07-2
 
 #  Proper shell initialization for Conda under Snellius
 # eval "$(command conda 'shell.bash' 'hook' 2> /dev/null)"
-conda activate atics_p2
+source activate atics_p2
 
 # echo "Installing correct transformers stack..."
 pip install --upgrade --force-reinstall --no-cache-dir \
@@ -24,7 +24,7 @@ pip install --upgrade --force-reinstall --no-cache-dir \
   datasets==2.14.0 \
   accelerate==0.27.2 \
   "huggingface-hub>=0.30.0,<1.0.0" \
-  fsspec==2023.6.0
+  fsspec>=2023.9.0
 
 #  Confirm install worked
 python -c "import transformers; print('Transformers is now available')"
