@@ -10,7 +10,7 @@
 
 module load 2023
 module load Anaconda3/2023.07-2
-conda activate atics_p2
+source activate atics_p2
 
 echo "Unistalling everything"
 pip uninstall -y transformers tokenizers datasets accelerate huggingface-hub fsspec
