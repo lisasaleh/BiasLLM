@@ -160,7 +160,9 @@ if __name__ == "__main__":
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
         overwrite_output_dir=True,
+        save_safetensors=False
     )
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -173,6 +175,7 @@ if __name__ == "__main__":
     if args.bare_model is False:
         print("Starting training...")
         trainer.train()
+        trainer.save_state()
     print("Training complete.")
     eval_metrics = trainer.evaluate()
     print(f"Best validation F1: {eval_metrics['eval_f1_macro']:.4f}")
