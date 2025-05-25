@@ -18,6 +18,7 @@ conda activate atics_p2
 
 echo "Installing correct transformers stack..."
 pip install --upgrade --force-reinstall --no-cache-dir \
+  numpy==1.26.4 \
   transformers==4.36.2 \
   tokenizers==0.15.2 \
   datasets==2.14.0 \
