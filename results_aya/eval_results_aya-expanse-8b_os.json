@@ -1,0 +1,22 @@
+{
+  "checkpoint_path": "./aya_saved_models//aya-expanse-8b_os",
+  "max_samples": null,
+  "validation_metrics": {
+    "accuracy": 0.8012326656394453,
+    "f1_macro": 0.6040380822656395,
+    "precision_macro": 0.7889778325123153,
+    "recall_macro": 0.5936128620442033,
+    "invalid_percent": 8.976157082748948,
+    "total_samples": 713,
+    "valid_samples": 649
+  },
+  "test_metrics": {
+    "accuracy": 0.761570827489481,
+    "f1_macro": 0.565443411919922,
+    "precision_macro": 0.7534363068379035,
+    "recall_macro": 0.5732332350404205,
+    "invalid_percent": 8.823529411764707,
+    "total_samples": 782,
+    "valid_samples": 713
+  }
+}
