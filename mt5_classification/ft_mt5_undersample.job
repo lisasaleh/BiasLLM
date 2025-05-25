@@ -32,6 +32,6 @@ python -c "import transformers; print('Transformers is now available')"
 cd $HOME/BiasLLM/mt5_classification
 
 python pretraining_mt5_classification.py --sampling undersample --seed 50 --output_dir .runs/seed_50
-python pretraining_mt5_classification.py --sampling undersample --seed 51 --output_dir .runs/seed_51
+#python pretraining_mt5_classification.py --sampling undersample --seed 51 --output_dir .runs/seed_51
 
 echo "Done."
