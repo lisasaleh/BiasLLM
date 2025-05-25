@@ -6,36 +6,31 @@
 #SBATCH --gpus=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=9
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 
 module purge
 module load 2023
 module load Anaconda3/2023.07-2
 
+#  Proper shell initialization for Conda under Snellius
 eval "$(command conda 'shell.bash' 'hook' 2> /dev/null)"
-
-source activate atics_p2
-
-echo "Unistalling everything"
-pip uninstall -y transformers tokenizers datasets accelerate huggingface-hub fsspec
+conda activate atics_p2
 
 echo "Installing correct transformers stack..."
 pip install --upgrade --force-reinstall --no-cache-dir \
-    transformers==4.36.2 \
-    tokenizers==0.19.1 \
-    datasets==2.14.0 \
-    accelerate==1.7.0 \
-    huggingface-hub>=0.30.0,<1.0.0 \
-    fsspec==2023.6.0
+  transformers==4.36.2 \
+  tokenizers==0.19.1 \
+  datasets==2.14.0 \
+  accelerate==1.7.0 \
+  "huggingface-hub>=0.30.0,<1.0.0" \
+  fsspec==2023.6.0
 
-echo "Dependencies installed."
+#  Confirm install worked
+python -c "import transformers; print('Transformers is now available')"
 
 cd $HOME/BiasLLM/mt5_classification
 
-echo "Starting fine-tuning with seed 50..."
 python pretraining_mt5_classification.py --sampling undersample --seed 50
-
-echo "Starting fine-tuning with seed 51..."
 python pretraining_mt5_classification.py --sampling undersample --seed 51
 
 echo "Done."
