@@ -1,5 +1,14 @@
 import pandas as pd
 
+# ---------- Constants & Defaults ----------
+STRAT_ABBREV = {
+    "undersample": "us",
+    "oversample":  "os", 
+    "balanced":    "bl",
+    "normal":      "nm",
+}
+
+# ---------- Functions ----------
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=42):
     biased = df[df.label == 1]
     unbiased = df[df.label == 0]
@@ -35,4 +44,4 @@ def sample_data(df, strategy="undersample", oversample_factor=2, undersample_rat
         return df
 
     else:
-        raise ValueError("Unsupported strategy.")
+        raise ValueError("Unsupported strategy.")
