@@ -1,3 +1,8 @@
+"""Evaluate pretrained model on the DGDB dataset.
+
+NOTE: Deprecated. Use the `eval_prompt.py` script instead. Keeping this for reference.
+"""
+
 import os
 import argparse
 import random
@@ -15,6 +20,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
 from tqdm import tqdm
+
 
 # Clear any existing CUDA cache
 if torch.cuda.is_available():
@@ -41,29 +47,6 @@ def parse_args():
     p.add_argument("--quantize_4bit", action="store_true", default=True)
     return p.parse_args()
 
-# ---------- Data Sampling ----------
-def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=42):
-    biased = df[df.label == 1]
-    unbiased = df[df.label == 0]
-
-    if strategy == "undersample":
-        unbiased_sampled = unbiased.sample(frac=undersample_ratio, random_state=random_state)
-        return pd.concat([biased, unbiased_sampled])
-    elif strategy == "oversample":
-        return pd.concat([biased] * oversample_factor + [unbiased])
-    elif strategy == "balanced":
-        target_total = len(df)
-        unbiased_target = int(target_total * balanced_neg_ratio)
-        biased_target = target_total - unbiased_target
-        neg_sampled = unbiased.sample(n=unbiased_target, random_state=random_state)
-        repeats = biased_target // len(biased)
-        remainder = biased_target % len(biased)
-        biased_repeated = pd.concat([biased] * repeats + [biased.sample(n=remainder, random_state=random_state)])
-        return pd.concat([biased_repeated, neg_sampled])
-    elif strategy == "normal":
-        return df
-    else:
-        raise ValueError("Unsupported strategy.")
 
 def classify_answer(text):
     """Classify the answer text as 'ja' (1), 'nee' (0), or invalid (-1).
@@ -81,10 +64,14 @@ def classify_answer(text):
     # Clean the text - remove leading/trailing whitespace
     text = text.strip().lower()
     
+    # # Remove one trailing punctuation mark (if any)
+    # if text and text[-1] in '.,!?;:"\')]}»':
+    #     text = text[:-1]
+    
     # Remove trailing punctuation (if any)
     while text and text[-1] in '.,!?;:"\')]}»':
         text = text[:-1]
-    
+
     # # Remove leading punctuation (if any)
     # while text and text[0] in '"\'{([':
     #     text = text[1:]
@@ -221,6 +208,12 @@ def compute_metrics_simple(predictions, true_labels, invalid_count):
             "f1_macro": 0.0,
             "precision_macro": 0.0,
             "recall_macro": 0.0,
+            "f1_class_0_not_biased": 0.0,
+            "f1_class_1_biased": 0.0,
+            "precision_class_0_not_biased": 0.0,
+            "precision_class_1_biased": 0.0,
+            "recall_class_0_not_biased": 0.0,
+            "recall_class_1_biased": 0.0,
             "invalid_percent": 100.0,
             "total_samples": total_samples,
             "valid_samples": 0
@@ -229,11 +222,42 @@ def compute_metrics_simple(predictions, true_labels, invalid_count):
     valid_preds = [predictions[i] for i in valid_indices]
     valid_labels = [true_labels[i] for i in valid_indices]
     
+    # Check which classes are present
+    unique_labels = set(valid_labels)
+    unique_preds = set(valid_preds)
+    
+    # Compute per-class F1 scores with zero_division handling
+    f1_per_class = f1_score(valid_labels, valid_preds, average=None, zero_division=0)
+    precision_per_class = precision_score(valid_labels, valid_preds, average=None, zero_division=0)
+    recall_per_class = recall_score(valid_labels, valid_preds, average=None, zero_division=0)
+    
+    # Ensure we have values for both classes (pad with 0 if class not present)
+    if len(f1_per_class) == 1:
+        # Only one class present, determine which one
+        if 0 in unique_labels or 0 in unique_preds:
+            f1_class_0, f1_class_1 = f1_per_class[0], 0.0
+            precision_class_0, precision_class_1 = precision_per_class[0], 0.0
+            recall_class_0, recall_class_1 = recall_per_class[0], 0.0
+        else:
+            f1_class_0, f1_class_1 = 0.0, f1_per_class[0]
+            precision_class_0, precision_class_1 = 0.0, precision_per_class[0]
+            recall_class_0, recall_class_1 = 0.0, recall_per_class[0]
+    else:
+        f1_class_0, f1_class_1 = f1_per_class[0], f1_per_class[1]
+        precision_class_0, precision_class_1 = precision_per_class[0], precision_per_class[1]
+        recall_class_0, recall_class_1 = recall_per_class[0], recall_per_class[1]
+    
     metrics = {
         "accuracy": accuracy_score(valid_labels, valid_preds),
-        "f1_macro": f1_score(valid_labels, valid_preds, average='macro'),
-        "precision_macro": precision_score(valid_labels, valid_preds, average='macro'),
-        "recall_macro": recall_score(valid_labels, valid_preds, average='macro'),
+        "f1_macro": f1_score(valid_labels, valid_preds, average='macro', zero_division=0),
+        "precision_macro": precision_score(valid_labels, valid_preds, average='macro', zero_division=0),
+        "recall_macro": recall_score(valid_labels, valid_preds, average='macro', zero_division=0),
+        "f1_class_0_not_biased": f1_class_0,
+        "f1_class_1_biased": f1_class_1,
+        "precision_class_0_not_biased": precision_class_0,
+        "precision_class_1_biased": precision_class_1,
+        "recall_class_0_not_biased": recall_class_0,
+        "recall_class_1_biased": recall_class_1,
         "invalid_percent": (invalid_count / total_samples * 100),
         "total_samples": total_samples,
         "valid_samples": len(valid_indices)
@@ -247,6 +271,13 @@ def compute_metrics_simple(predictions, true_labels, invalid_count):
     print(f"Valid predictions: #positive={pos_preds}, #negative={neg_preds}")
     print(f"True labels: #positive={pos_labels}, #negative={neg_labels}")
     print(f"Invalid predictions: {invalid_count}/{total_samples} ({invalid_count/total_samples*100:.2f}%)")
+    
+    # Print per-class metrics
+    print(f"\nPer-class metrics:")
+    print(f"Class 0 (Not Biased) - F1: {metrics['f1_class_0_not_biased']:.4f}, Precision: {metrics['precision_class_0_not_biased']:.4f}, Recall: {metrics['recall_class_0_not_biased']:.4f}")
+    print(f"Class 1 (Biased)     - F1: {metrics['f1_class_1_biased']:.4f}, Precision: {metrics['precision_class_1_biased']:.4f}, Recall: {metrics['recall_class_1_biased']:.4f}")
+    print(f"Macro Average       - F1: {metrics['f1_macro']:.4f}, Precision: {metrics['precision_macro']:.4f}, Recall: {metrics['recall_macro']:.4f}")
+    print(f"Overall Accuracy: {metrics['accuracy']:.4f}")
     
     return metrics
 
