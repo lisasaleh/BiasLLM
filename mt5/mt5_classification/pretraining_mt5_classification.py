@@ -29,8 +29,11 @@ def parse_args():
     p.add_argument("--patience", type=int, default=5,
                    help="Early stopping patience")
     p.add_argument("--output_dir", type=str, default="./results")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--bare_model", action='store_true')
+    p.add_argument("--seed", type=int, default=43)
+    p.add_argument("--focal_loss", action="store_true", default=False,
+                   help='Use focal loss to handle class imbalance')
+    p.add_argument("--focal_gamma", type=float, default=2.0,
+                   help='Gamma parameter for focal loss')
     return p.parse_args()
 
 def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=None):
@@ -82,8 +85,8 @@ class MT5Classifier(nn.Module):
         self.classifier = nn.Linear(self.encoder.config.d_model, num_labels)
     def forward(self, input_ids, attention_mask=None, labels=None):
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
-        # Use the first token ([CLS]-like) representation
-        pooled = outputs.last_hidden_state[:, 0, :]
+        # Use the mean of the
+        pooled = outputs.last_hidden_state.mean(dim=1)
         logits = self.classifier(self.dropout(pooled))
         loss = None
         if labels is not None:
@@ -92,20 +95,65 @@ class MT5Classifier(nn.Module):
         return {'loss': loss, 'logits': logits}
 
 def compute_metrics_classification(pred):
+    from sklearn.metrics import classification_report
+
     preds = np.argmax(pred.predictions, axis=1)
     labels = pred.label_ids
-    print(f"Predictions: {preds}")
-    print(f"Labels: {labels}")
+
+    # Standard metrics
     acc = (preds == labels).mean()
-    f1 = f1_score(labels, preds, average="macro")
-    prec = precision_score(labels, preds, average="macro")
-    rec = recall_score(labels, preds, average="macro")
+    f1_macro = f1_score(labels, preds, average="macro")
+    f1_micro = f1_score(labels, preds, average="micro")
+    prec_macro = precision_score(labels, preds, average="macro")
+    rec_macro = recall_score(labels, preds, average="macro")
+
+    # Per-class F1 scores
+    f1_per_class = f1_score(labels, preds, average=None)
+    class_report = classification_report(labels, preds, output_dict=True)
+    print("Classification Report:\n", classification_report(labels, preds))
+    # Create dictionary with per-class F1s
+    per_class_metrics = {
+        f"f1_class_{i}": score for i, score in enumerate(f1_per_class)
+    }
+
+    # Combine all metrics
     return {
         "accuracy": acc,
-        "f1_macro": f1,
-        "precision_macro": prec,
-        "recall_macro": rec,
+        "f1_macro": f1_macro,
+        "f1_micro": f1_micro,
+        "precision_macro": prec_macro,
+        "recall_macro": rec_macro,
+        **per_class_metrics
     }
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha, device, gamma=2.0):
+        super().__init__()
+        self.alpha = torch.tensor(alpha, dtype=torch.float, device=device)
+        self.gamma = gamma
+        self.ce = nn.CrossEntropyLoss(reduction="none")
+        
+    def forward(self, logits, labels):
+        ce_loss = self.ce(logits, labels)
+        pt = torch.exp(-ce_loss)
+        alpha_t = self.alpha[labels]
+        focal_factor = alpha_t * (1 - pt) ** self.gamma
+        return (focal_factor * ce_loss).mean()
+
+class ClassificationWithFocal(Trainer):
+    def __init__(self, focal_alpha, focal_gamma, **kwargs):
+        super().__init__(**kwargs)
+        device = kwargs.get('device', torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.focal_loss = FocalLoss(alpha=focal_alpha,
+                                  device=device,
+                                  gamma=focal_gamma)
+    
+    def compute_loss(self, model, inputs, return_outputs=False):
+        outputs = model(**inputs)
+        logits = outputs['logits']
+        labels = inputs['labels']
+        loss = self.focal_loss(logits, labels)
+        return (loss, outputs) if return_outputs else loss
 
 if __name__ == "__main__":
     args = parse_args()
@@ -118,10 +166,21 @@ if __name__ == "__main__":
     dataset = load_dataset("milenamileentje/Dutch-Government-Data-for-Bias-detection")
     train_df = dataset["train"].to_pandas()
     train_df = sample_data(train_df, strategy=args.sampling, random_state=args.seed).sample(frac=1, random_state=args.seed).reset_index(drop=True)
+    
+    # Compute class weights if using focal loss
+    weights = None
+    if args.focal_loss:
+        weights = compute_class_weight(
+            class_weight="balanced",
+            classes=np.array([0, 1]),
+            y=train_df.label.values
+        ).tolist()
+    
     train_ds = Dataset.from_pandas(train_df, preserve_index=False)
     val_df = dataset["validation"].to_pandas()
     val_ds = Dataset.from_pandas(val_df, preserve_index=False)
     test_ds = dataset["test"]
+    
     tokenized_train = train_ds.map(
         preprocess_classification,
         batched=True,
@@ -145,47 +204,60 @@ if __name__ == "__main__":
     )
     for ds in (tokenized_train, tokenized_val, tokenized_test):
         ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         learning_rate=args.lr,
         per_device_train_batch_size=args.bs,
         per_device_eval_batch_size=args.bs,
         num_train_epochs=args.epochs,
         weight_decay=args.wd,
-        save_strategy="epoch",
+        #save_strategy="epoch",
         logging_dir="./logs",
         logging_steps=10,
         report_to="none",
         load_best_model_at_end=True,
         metric_for_best_model="f1_macro",
         overwrite_output_dir=True,
-        save_safetensors=False
     )
-
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized_train,
-        eval_dataset=tokenized_val,
-        tokenizer=tokenizer,
-        compute_metrics=compute_metrics_classification,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
-    )
-    if args.bare_model is False:
-        print("Starting training...")
-        trainer.train()
-        trainer.save_state()
+    
+    if args.focal_loss:
+        trainer = ClassificationWithFocal(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_val,
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics_classification,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)],
+            focal_alpha=weights,
+            focal_gamma=args.focal_gamma
+        )
+    else:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            eval_dataset=tokenized_val,
+            tokenizer=tokenizer,
+            compute_metrics=compute_metrics_classification,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=args.patience)]
+        )
+    
+    print("Starting training...")
+    trainer.train()
     print("Training complete.")
     eval_metrics = trainer.evaluate()
     print(f"Best validation F1: {eval_metrics['eval_f1_macro']:.4f}")
-    if args.bare_model is False:
-        abbrev = STRAT_ABBREV[args.sampling]
-        safe_name = model_name.replace("/", "-")
-        model_dir = f"{args.output_dir}/{safe_name}_clf_{abbrev}_f1_{args.sampling}_{eval_metrics['eval_f1_macro']:.4f}"
-        print(f"Model saved to {model_dir}")
-        model.encoder.save_pretrained(model_dir, safe_serialization=True)
-        tokenizer.save_pretrained(model_dir)
+    abbrev = STRAT_ABBREV[args.sampling]
+    safe_name = model_name.replace("/", "-")
+    model_dir = f"{args.output_dir}/{safe_name}_clf_{abbrev}_f1_{args.sampling}_{eval_metrics['eval_f1_macro']:.4f}"
+    if args.focal_loss:
+        model_dir += "_focal"
+    print(f"Model saved to {model_dir}")
+    torch.save(trainer.state_dict(), model_dir + "/model.pt")
+    print("Evaluating on test set...")
     test_pred = trainer.predict(tokenized_test)
     test_metrics = compute_metrics_classification(test_pred)
     print("Test metrics:", test_metrics) 
