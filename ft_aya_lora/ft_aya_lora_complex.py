@@ -10,21 +10,16 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from datasets import load_dataset, Dataset
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, BitsAndBytesConfig, EarlyStoppingCallback, TrainerCallback
 from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
-# ---------- Constants & Defaults ----------
-STRAT_ABBREV = {
-    "undersample": "us",
-    "oversample":  "os",
-    "balanced":    "bl",
-    "normal":      "nm",
-}
+from utils.data_utils import STRAT_ABBREV, sample_data
+from utils.model_utils import preprocess, compute_metrics, TRAIN_MAX_SEQ_LENGTH
 
-TRAIN_MAX_SEQ_LENGTH = 512  # reduce to 256 to save memory
+# ---------- Constants & Defaults ----------
+TRAIN_MAX_SEQ_LENGTH = TRAIN_MAX_SEQ_LENGTH  # reduce to 256 to save memory
 DEFAULT_QUANTIZE_4BIT = True
 DEFAULT_FLASH_ATTENTION = True 
 DEFAULT_GRAD_ACC_STEPS = 4  # increased to reduce memory usage
@@ -38,16 +33,16 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sampling", choices=list(STRAT_ABBREV.keys()), default="normal")
     p.add_argument("--loss_type", type=str, 
-                    choices=["standard", "weighted", "focal"], 
+                    choices=["standard", "weighted", "focal", "sample_weighted"], 
                     default="standard", 
-                    help="Loss function type: standard CE, weighted CE, or focal loss")
+                    help="Loss function type: standard CE, weighted CE, focal loss, or sample-weighted CE")
     p.add_argument("--focal_gamma", 
                     type=float, 
                     default=2.0, 
                     help="Gamma parameter for focal loss (higher value = more focus on hard examples)")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--bs", type=int, default=8, help="per-device train batch size")
+    p.add_argument("--bs", type=int, default=4, help="per-device train batch size")
     p.add_argument("--wd", type=float, default=0.0, help="weight decay")
     p.add_argument("--patience", type=int, default=5, help="early stop patience")
     p.add_argument("--early_stopping", action="store_true", help="Enable early stopping")
@@ -100,307 +95,66 @@ def parse_args():
 
     return p.parse_args()
 
-# ---------- Data Sampling ----------
-def sample_data(df, strategy="undersample", oversample_factor=2, undersample_ratio=0.7, balanced_neg_ratio=0.5, random_state=42):
-    biased = df[df.label == 1]
-    unbiased = df[df.label == 0]
-
-    if strategy == "undersample":
-        # Undersample the unbiased (majority) class to match a specified ratio
-        unbiased_sampled = unbiased.sample(frac=undersample_ratio, random_state=random_state)
-        return pd.concat([biased, unbiased_sampled])
-
-    elif strategy == "oversample":
-        # Duplicate the biased (minority) class oversample_factor times
-        return pd.concat([biased] * oversample_factor + [unbiased])
-
-    elif strategy == "balanced":
-        # Target 50% biased, 50% unbiased in the final dataset (or as specified by balanced_neg_ratio)
-        target_total = len(df)  # preserve the original size
-        unbiased_target = int(target_total * balanced_neg_ratio)  # target number of unbiased samples  
-        biased_target = target_total - unbiased_target  # target number of biased samples 
-
-        # Sample unbiased samples to match the target
-        neg_sampled = unbiased.sample(n=unbiased_target, random_state=random_state)
-
-        # Compute the number of times to duplicate all biased samples
-        repeats = biased_target // len(biased)
-        # Compute the remainder of biased samples to sample to reach target
-        remainder = biased_target % len(biased)
-
-        # Sample biased samples to match the target based on the number of repeats and remainder
-        biased_repeated = pd.concat([biased] * repeats + [biased.sample(n=remainder, random_state=random_state)])
-        return pd.concat([biased_repeated, neg_sampled])
-
-    elif strategy == "normal":
-        return df
-
-    else:
-        raise ValueError("Unsupported strategy.")
-
-def preprocess(example):
-    """
-    Preprocess an example for training/evaluation.
-    
-    Converts the numeric label (0/1) to the textual format ("ja"/"nee") that the model will generate,
-    then tokenizes the input and target, and creates the appropriate input_ids, attention_mask, and labels.
-    """
-    # complete the prompt with the example text
-    prompt = prompt_template.format(text=example["text"])
-    
-    # convert binary label (0/1) to the text format "ja"/"nee" that the model will generate
-    target = "ja" if example["label"] == 1 else "nee"
-    
-    # tokenize the prompt and target (separately)
-    prompt_tokens = tokenizer(prompt, truncation=True, max_length=TRAIN_MAX_SEQ_LENGTH, add_special_tokens=False)
-    target_tokens = tokenizer(target, truncation=True, max_length=5, add_special_tokens=False)
-    
-    # combine tokenized prompt and target
-    input_ids = prompt_tokens["input_ids"] + target_tokens["input_ids"]
-    attn_mask = prompt_tokens["attention_mask"] + target_tokens["attention_mask"]
-    
-    # for causal LM training, we only want to predict the target tokens, not the prompt tokens
-    # -100 is the ignore index for the loss function 
-    labels = [-100] * len(prompt_tokens["input_ids"]) + target_tokens["input_ids"]
-    
-    # truncate sequences to maximum length
-    input_ids = input_ids[:TRAIN_MAX_SEQ_LENGTH]
-    attn_mask = attn_mask[:TRAIN_MAX_SEQ_LENGTH]
-    labels = labels[:TRAIN_MAX_SEQ_LENGTH]
-    
-    return {
-        "input_ids": input_ids, 
-        "attention_mask": attn_mask, 
-        "labels": labels
-    }
-
-
-# ---------- Metrics ----------
-def classify_answers(text_list):
-    """
-    Classify each example sentence as:
-        1  if the last word is exactly "ja" (case-insensitive),
-        0  if the last word is exactly "nee" (case-insensitive),
-        -1  otherwise (invalid answer).
-
-    Parameters:
-        text_list: List of text strings (generated outputs).
-
-    Returns:
-        List of ints (1, 0, or -1) corresponding to each input string.
-    """
-    preds = []
-    for text in text_list:
-        words = text.strip().lower().split()
-        
-        # if the last word is "ja" or "nee", classify as 1 or 0 respectively, otherwise as invalid          
-        if words[-1] == "ja":
-            preds.append(1)  # biased
-        elif words[-1] == "nee":
-            preds.append(0)  # not biased
-        else:
-            preds.append(-1)  # invalid answer
-
-    return preds
-
-def compute_metrics(eval_pred):
-    preds, labels = eval_pred
-    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-    
-    # decode predictions and labels to text
-    decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-    
-    # print a few examples for debugging
-    if len(decoded_preds) > 0:
-        print("\nExample predictions:")
-        for i in range(min(3, len(decoded_preds))):
-            print(f"Pred {i}: '{decoded_preds[i]}'")
-            if i < len(decoded_labels):
-                print(f"Label {i}: '{decoded_labels[i]}'")
-    
-    # convert text to numeric labels (1, 0, -1)
-    pred_labels = classify_answers(decoded_preds)
-    true_labels = classify_answers(decoded_labels)
-    
-    # count invalid predictions/labels
-    invalid_preds = pred_labels.count(-1)
-    invalid_labels = true_labels.count(-1)
-    
-    # log information about invalid predictions
-    print(f"Invalid predictions: {invalid_preds}/{len(pred_labels)} ({invalid_preds/max(1,len(pred_labels))*100:.2f}%)")
-    
-    # get indices of samples with valid predictions and labels
-    valid_indices = [i for i, (p, l) in enumerate(zip(pred_labels, true_labels)) 
-                    if p != -1 and l != -1]
-    
-    # handle case with no valid predictions
-    if not valid_indices:
-        print("No valid predictions/labels found!")
-        return {
-            "accuracy": 0.0,
-            "f1_macro": 0.0,
-            "precision_macro": 0.0,
-            "recall_macro": 0.0,
-            "invalid_preds_percent": 100.0 if pred_labels else 0.0,
-            "invalid_labels_percent": 100.0 if true_labels else 0.0
-        }
-
-    # extract valid predictions and labels
-    valid_preds = [pred_labels[i] for i in valid_indices]
-    valid_labels = [true_labels[i] for i in valid_indices]
-    
-    # Calculate binary classification metrics
-    metrics = {
-        "accuracy": accuracy_score(valid_labels, valid_preds),
-        "f1_macro": f1_score(valid_labels, valid_preds, pos_label=1, average='macro'),
-        "precision_macro": precision_score(valid_labels, valid_preds, pos_label=1, average='macro'),
-        "recall_macro": recall_score(valid_labels, valid_preds, pos_label=1, average='macro'),
-        "invalid_preds_percent": (invalid_preds / len(pred_labels) * 100) if pred_labels else 0.0,
-        "invalid_labels_percent": (invalid_labels / len(true_labels) * 100) if true_labels else 0.0
-    }
-    
-    # log counts of class distribution in valid predictions
-    pos_preds = valid_preds.count(1)
-    neg_preds = valid_preds.count(0)
-    print(f"Valid predictions: #positive={pos_preds}, #negative={neg_preds}")
-
-    return metrics
-
-
-# ---------- Weighted Loss Implementation ----------
+# ---------- Token-Level Weighted Loss Implementation ----------
 class WeightedCrossEntropyLoss(nn.Module):
+    """
+    Vocabulary-level weighted cross-entropy loss.
+    Creates a weight tensor for the entire vocabulary where only target tokens
+    ("ja" and "nee") get class weights, all other tokens get weight 1.0.
+    """
     def __init__(self, class_weights, ignore_index=-100, tokenizer=None):
         super().__init__()
-        self.class_weights = class_weights  # [weight_neg, weight_pos]
+        self.class_weights = class_weights  # [weight_nee, weight_ja]
         self.ignore_index = ignore_index
         self.tokenizer = tokenizer
-    
-    def forward(self, logits, labels):
-        """
-        Apply weighted cross-entropy loss to model outputs.
-        
-        Args:
-            logits: Model output logits of shape [batch_size, seq_len, vocab_size]
-            labels: Target labels of shape [batch_size, seq_len]
-            
-        Returns:
-            Weighted loss value
-        """
-        # Get vocab size from logits
-        batch_size, seq_len, vocab_size = logits.shape
-        
-        # Create a mapping from token IDs to class weights
-        # Default weight is 1.0 for tokens that aren't "ja"/"nee"
-        token_weights = torch.ones(vocab_size, device=logits.device)
         
         # Get token IDs for "ja" and "nee"
-        # These represent the positive and negative classes
-        ja_token_ids = self.tokenizer("ja", add_special_tokens=False).input_ids
-        nee_token_ids = self.tokenizer("nee", add_special_tokens=False).input_ids
+        self.ja_token_ids = self.tokenizer("ja", add_special_tokens=False).input_ids
+        self.nee_token_ids = self.tokenizer("nee", add_special_tokens=False).input_ids
+
+        # Create vocabulary-level weight tensor
+        vocab_size = self.tokenizer.vocab_size
+        self.weight_tensor = torch.ones(vocab_size, dtype=torch.float)
         
-        # Set weights for class tokens
-        for token_id in ja_token_ids:
-            token_weights[token_id] = self.class_weights[1]  # positive class weight
+        # Set weights for target tokens
+        for ja_token_id in self.ja_token_ids:
+            if 0 <= ja_token_id < vocab_size:
+                self.weight_tensor[ja_token_id] = class_weights[1]  # weight for "ja"
+                
+        for nee_token_id in self.nee_token_ids:
+            if 0 <= nee_token_id < vocab_size:
+                self.weight_tensor[nee_token_id] = class_weights[0]  # weight for "nee"
         
-        for token_id in nee_token_ids:
-            token_weights[token_id] = self.class_weights[0]  # negative class weight
+        print(f"WeightedCrossEntropyLoss initialized:")
+        print(f"  ja_token_ids: {self.ja_token_ids} (weight: {class_weights[1]})")
+        print(f"  nee_token_ids: {self.nee_token_ids} (weight: {class_weights[0]})")
+        print(f"  vocab_size: {vocab_size}")
+        print(f"  Non-unit weights in vocabulary: {(self.weight_tensor != 1.0).sum().item()}")
+
+    def forward(self, logits, labels):
+        """
+        Apply vocabulary-level weighted cross-entropy loss to model outputs.
+        Uses PyTorch's built-in weight parameter in CrossEntropyLoss.
+        """
+        batch_size, seq_len, vocab_size = logits.shape
         
-        # Reshape for CrossEntropyLoss
-        flat_logits = logits.view(-1, vocab_size)
-        flat_labels = labels.view(-1)
+        # Move weight tensor to same device as logits
+        weight_tensor = self.weight_tensor.to(logits.device)
         
-        # Create loss function with token weights
+        # Use PyTorch's built-in weighted cross-entropy
         loss_fct = nn.CrossEntropyLoss(
-            weight=token_weights,
+            weight=weight_tensor,
             ignore_index=self.ignore_index,
             reduction='mean'
         )
         
-        # Compute loss
-        loss = loss_fct(flat_logits, flat_labels)
-        return loss
-
-# ---------- Focal Loss Implementation ----------
-class FocalLoss(nn.Module):
-    """
-    Focal Loss implementation for handling both class imbalance and hard examples.
-    
-    Focal Loss adds a focusing parameter (gamma) that reduces the impact of well-classified examples
-    and increases the impact of misclassified examples during training.
-    
-    Formula: FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    Where:
-      - alpha_t is the class weight
-      - gamma is the focusing parameter
-      - p_t is the model's estimated probability for the target class
-    """
-    def __init__(self, class_weights, gamma=2.0, ignore_index=-100, tokenizer=None):
-        super().__init__()
-        self.class_weights = class_weights  # [weight_neg, weight_pos]
-        self.gamma = gamma
-        self.ignore_index = ignore_index
-        self.tokenizer = tokenizer
-    
-    def forward(self, logits, labels):
-        """
-        Apply focal loss to model outputs.
-        
-        Args:
-            logits: Model output logits of shape [batch_size, seq_len, vocab_size]
-            labels: Target labels of shape [batch_size, seq_len]
-            
-        Returns:
-            Focal loss value
-        """
-        # Get vocab size from logits
-        batch_size, seq_len, vocab_size = logits.shape
-        
-        # Create a mapping from token IDs to class weights
-        # Default weight is 1.0 for tokens that aren't "ja"/"nee"
-        token_weights = torch.ones(vocab_size, device=logits.device)
-        
-        # Get token IDs for "ja" and "nee"
-        # These represent the positive and negative classes
-        ja_token_ids = self.tokenizer("ja", add_special_tokens=False).input_ids
-        nee_token_ids = self.tokenizer("nee", add_special_tokens=False).input_ids
-        
-        # Set weights for class tokens
-        for token_id in ja_token_ids:
-            token_weights[token_id] = self.class_weights[1]  # positive class weight
-        
-        for token_id in nee_token_ids:
-            token_weights[token_id] = self.class_weights[0]  # negative class weight
-        
-        # Reshape for loss calculation
+        # Flatten and compute loss
         flat_logits = logits.view(-1, vocab_size)
         flat_labels = labels.view(-1)
         
-        # Filter out ignored indices
-        mask = flat_labels != self.ignore_index
-        flat_logits = flat_logits[mask]
-        flat_labels = flat_labels[mask]
+        loss = loss_fct(flat_logits, flat_labels)
         
-        if flat_labels.shape[0] == 0:
-            return torch.tensor(0.0, device=logits.device, requires_grad=True)
-        
-        # Compute softmax probabilities
-        log_softmax = nn.LogSoftmax(dim=1)(flat_logits)
-        log_pt = log_softmax.gather(1, flat_labels.unsqueeze(1))
-        pt = log_pt.exp()  # pt is the softmax probability for the target class
-        
-        # Get class weights for the actual targets
-        label_weights = torch.zeros_like(flat_labels, dtype=torch.float, device=flat_labels.device)
-        for i, label in enumerate(flat_labels):
-            label_weights[i] = token_weights[label]
-            
-        # Compute focal modulating factor: (1-pt)^gamma
-        focal_weight = (1 - pt) ** self.gamma
-        
-        # Compute weighted focal loss
-        loss = -label_weights * focal_weight.view(-1) * log_pt.view(-1)
-        return loss.mean()
-
+        return loss
 
 # ---------- Custom Callbacks ----------
 class ClassificationMetricsCallback(TrainerCallback):
@@ -428,10 +182,6 @@ class ClassificationMetricsCallback(TrainerCallback):
             if "accuracy" in key and "eval" not in key:
                 logs.pop(key, None)
                 
-        # Add a note about classification metrics
-        if "loss" in logs and "eval_accuracy" not in logs:
-            logs["classification_metrics_note"] = "Classification metrics available during evaluation steps"
-    
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         """Print classification metrics after each evaluation."""
         if metrics is None:
@@ -441,6 +191,10 @@ class ClassificationMetricsCallback(TrainerCallback):
             metrics["classification_performance"] = f"F1={metrics.get('eval_f1_macro', 0):.4f}, Acc={metrics.get('eval_accuracy', 0):.4f}"
 
 class WeightedSFTTrainer(SFTTrainer):
+    """
+    Trainer that uses vocabulary-level weighted cross-entropy loss (MT5-style approach).
+    This approach is cleaner and more similar to the MT5 implementation.
+    """
     def __init__(self, class_weights, tokenizer=None, **kwargs):
         super().__init__(**kwargs)
         self.class_weights = class_weights
@@ -455,58 +209,17 @@ class WeightedSFTTrainer(SFTTrainer):
             tokenizer=tokenizer
         )
         
-        # Add the classification metrics callback
-        if not any(isinstance(callback, ClassificationMetricsCallback) for callback in self.callback_handler.callbacks):
-            self.add_callback(ClassificationMetricsCallback(
-                tokenizer=tokenizer,
-                compute_metrics_fn=self.compute_metrics if hasattr(self, "compute_metrics") else None,
-                eval_dataset=self.eval_dataset
-            ))
-    
+        print(f"WeightedSFTTrainer initialized with vocabulary-level weighting")
+        print(f"  Class weights: {class_weights} [nee (0), ja (1)]")
+
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
-        Override to use weighted loss
+        Override to use vocabulary-level weighted cross-entropy loss
         """
         outputs = model(**inputs)
         logits = outputs.logits
         labels = inputs["labels"]
         loss = self.weighted_loss(logits, labels)
-        
-        return (loss, outputs) if return_outputs else loss
-
-class FocalSFTTrainer(SFTTrainer):
-    def __init__(self, class_weights, gamma=2.0, tokenizer=None, **kwargs):
-        super().__init__(**kwargs)
-        self.class_weights = class_weights
-        self.gamma = gamma
-        
-        # Use provided tokenizer or get it from the trainer
-        if tokenizer is None:
-            tokenizer = self.tokenizer
-            
-        self.focal_loss = FocalLoss(
-            class_weights=class_weights,
-            gamma=gamma,
-            ignore_index=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else -100,
-            tokenizer=tokenizer
-        )
-        
-        # Add the classification metrics callback
-        if not any(isinstance(callback, ClassificationMetricsCallback) for callback in self.callback_handler.callbacks):
-            self.add_callback(ClassificationMetricsCallback(
-                tokenizer=tokenizer,
-                compute_metrics_fn=self.compute_metrics if hasattr(self, "compute_metrics") else None,
-                eval_dataset=self.eval_dataset
-            ))
-    
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """
-        Override to use focal loss
-        """
-        outputs = model(**inputs)
-        logits = outputs.logits
-        labels = inputs["labels"]
-        loss = self.focal_loss(logits, labels)
         
         return (loss, outputs) if return_outputs else loss
 
@@ -528,41 +241,46 @@ class MetricsLoggerCallback(TrainerCallback):
         print("=============================\n")
 
 
-# ---------- Print Loss Comparison ----------
-def print_loss_comparison(loss_type, test_metrics):
-    """Print a formatted comparison of given loss type's performance."""
-    print(f"\n{'=' * 50}")
-    print(f"LOSS TYPE: {loss_type.upper()}")
-    if loss_type == "focal":
-        print(f"Gamma: {args.focal_gamma}")
-    print(f"{'=' * 50}")
-    print(f"F1 Score (macro): {test_metrics['f1_macro']:.4f}")
-    print(f"Accuracy:         {test_metrics['accuracy']:.4f}")
-    print(f"Precision:        {test_metrics['precision_macro']:.4f}")
-    print(f"Recall:           {test_metrics['recall_macro']:.4f}")
-    print(f"Invalid preds:    {test_metrics['invalid_preds_percent']:.2f}%")
-    print(f"{'=' * 50}\n")
-
-
 # -------------- Main --------------
 if __name__ == "__main__":
     args = parse_args()
 
-    # reproducibility
+    # ------- Seeds -------
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
 
-    # model_dir = "/scratch-shared/scur1424/aya_models"
-    # tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    # ------- CUDA memory management -------
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"CUDA device: {torch.cuda.get_device_name()}")
+        print(f"Available CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+        print(f"Current CUDA memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        print(f"Current CUDA memory reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
+    # ---------- Model & Tokenizer ----------
     model_name = "CohereLabs/aya-expanse-8b"
     
-    # ---------- Load Tokenizer ----------
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
+    print(f"Tokenizer pad token ID: {tokenizer.pad_token_id}")
+    
+    # Test tokenization of our target tokens
+    ja_token_ids = tokenizer("ja", add_special_tokens=False).input_ids
+    nee_token_ids = tokenizer("nee", add_special_tokens=False).input_ids
+
+    assert len(ja_token_ids) == 1, f"'ja' tokenized to multiple tokens: {ja_token_ids}"
+    assert len(nee_token_ids) == 1, f"'nee' tokenized to multiple tokens: {nee_token_ids}"
+
+    # ja_tokens = tokenizer("ja", add_special_tokens=False)
+    # nee_tokens = tokenizer("nee", add_special_tokens=False)
+    # print(f"'ja' tokenizes to: {ja_tokens}")
+    # print(f"'nee' tokenizes to: {nee_tokens}")
 
     # ---------- Bits & Bytes Quantization Config ----------
     quantization_config = None
@@ -589,7 +307,6 @@ if __name__ == "__main__":
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            # model_dir,
             trust_remote_code=True,
             quantization_config=quantization_config,
             attn_implementation=attn_impl,
@@ -602,7 +319,6 @@ if __name__ == "__main__":
         print("Trying to load with default precision...")
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            # model_dir,
             trust_remote_code=True,
             attn_implementation=attn_impl,
             device_map="auto",
@@ -626,7 +342,7 @@ if __name__ == "__main__":
         lora_dropout=args.lora_dropout,
         bias=args.lora_bias,
         task_type="CAUSAL_LM",
-        target_modules=target_modules,  # ["q_proj", "v_proj", "k_proj", "o_proj"]
+        target_modules=target_modules,  # or ["q_proj", "v_proj", "k_proj", "o_proj"]
     )
     
     model = get_peft_model(model, lora_config)
@@ -639,54 +355,55 @@ if __name__ == "__main__":
     print(f"Sampling: {args.sampling} -> {len(sampled_train_df)} samples")
     train_ds = Dataset.from_pandas(sampled_train_df)
     eval_ds = dataset["validation"]
-    test_ds = dataset["test"]
-
-    # ---------- Prompt & Preprocess ----------
-    prompt_template = (
-        "Je bent een expert op het gebied van bias, stereotypering en discriminatie. "
-        "Je taak is om zinnen te classificeren volgens de volgende definitie: een zin bevat bias "
-        "als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat, "
-        "die impliciet of expliciet kunnen zijn, en die gaan over een afgebakende groep personen, "
-        "OF als de zin een woord bevat dat vermeden moet worden vanwege bias. "
-        "Geef de volgende zin een label: 'ja' voor biased of 'nee' voor niet-biased. "
-        "Antwoord uitsluitend met 'ja' (biased) of 'nee' (niet-biased). Geen verdere uitleg. "
-        'De zin is: "{text}"'
-    )
-
-    tokenized_train = train_ds.map(preprocess, remove_columns=train_ds.column_names, batched=False)
-    tokenized_eval = eval_ds.map(preprocess, remove_columns=eval_ds.column_names, batched=False)
-    tokenized_test = test_ds.map(preprocess, remove_columns=test_ds.column_names, batched=False)
+    # test_ds = dataset["test"]
+    
+    tokenized_train = train_ds.map(lambda example: preprocess(example, tokenizer), remove_columns=train_ds.column_names, batched=False)
+    
+    # Clear memory after preprocessing training data
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"CUDA memory after train preprocessing: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    
+    tokenized_eval = eval_ds.map(lambda example: preprocess(example, tokenizer), remove_columns=eval_ds.column_names, batched=False)
+    # tokenized_test = test_ds.map(lambda example: preprocess(example, tokenizer), remove_columns=test_ds.column_names, batched=False)
+    
+    # Clear memory after all preprocessing
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"CUDA memory after all preprocessing: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # ---------- Training Arguments ----------
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.bs,
-        per_device_eval_batch_size=args.bs * 2,  # NOTE: larger eval batch size
+        # per_device_eval_batch_size removed to save memory during evaluation
         gradient_accumulation_steps=args.grad_acc_steps,
         gradient_checkpointing=args.use_grad_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": True},
-        optim="paged_adamw_32bit",  # OR adamw_torch_fused
+        gradient_checkpointing_kwargs={"use_reentrant": True},  
+        optim="paged_adamw_8bit",  # OR adamw_torch_fused
         # Checkpoint saving based on steps
-        save_strategy="steps",  
-        save_steps=50,
+        save_strategy="epoch",  
+        # save_steps=50,
         save_total_limit=1,  # keep only the 1 best checkpoint
-        # Evaluation settings
-        eval_strategy="steps",  # evaluate during training
-        eval_steps=50, 
-        # Best model handling
-        load_best_model_at_end=True,  
-        metric_for_best_model="f1_macro", 
-        greater_is_better=True, 
+        # Evaluation settings - DISABLED to save memory during training (to avoid CUDA OOM during evaluation)
+        # eval_strategy="epoch", 
+        # eval_steps=100,  
+        eval_accumulation_steps=10,  # for memory optimization 
+        # Best model handling - DISABLED to save memory
+        # load_best_model_at_end=True,  # requires extra memory to store best model
+        # metric_for_best_model="f1_macro", 
+        # greater_is_better=True,  
         # Logging settings
+        logging_strategy="steps",
         logging_steps=10,
         logging_dir=os.path.join(args.output_dir, "logs"),
-        report_to="none",
+        report_to="none",  # disable wandb/tensorboard logging to save memory
         # Optimizer settings
         learning_rate=args.lr,
         weight_decay=args.wd,
         fp16=False,  # use float16 for training
-        bf16=False,  # use bfloat16 for training
+        bf16=True,  # use bfloat16 for training
         warmup_ratio=0.05,
         group_by_length=True,
         lr_scheduler_type="constant",
@@ -710,7 +427,7 @@ if __name__ == "__main__":
         )
     
     # Compute class weights if using weighted/focal loss
-    if args.loss_type in ["weighted", "focal"]:
+    if args.loss_type in ["weighted", "focal", "sample_weighted"]:
         # Get train dataset labels
         train_labels = [sample["label"] for sample in dataset["train"]]
         
@@ -732,7 +449,22 @@ if __name__ == "__main__":
                 model=model,
                 args=training_args,
                 train_dataset=tokenized_train,
-                eval_dataset=tokenized_eval,
+                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
+                compute_metrics=compute_metrics,
+                callbacks=callbacks,
+            )
+        elif args.loss_type == "sample_weighted":
+            print("Using sample-weighted cross-entropy loss to handle class imbalance")
+            print(f"Computed class weights: {class_weights} [0=not biased, 1=biased]")
+            print("This applies weights at the sample level to avoid punctuation generation issues.")
+            
+            # Create sample-weighted trainer
+            trainer = SampleWeightedSFTTrainer(
+                class_weights=class_weights,
+                model=model,
+                args=training_args,
+                train_dataset=tokenized_train,
+                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
                 compute_metrics=compute_metrics,
                 callbacks=callbacks,
             )
@@ -748,7 +480,7 @@ if __name__ == "__main__":
                 model=model,
                 args=training_args,
                 train_dataset=tokenized_train,
-                eval_dataset=tokenized_eval,
+                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
                 compute_metrics=compute_metrics,
                 callbacks=callbacks,
             )
@@ -759,7 +491,7 @@ if __name__ == "__main__":
             model=model,
             args=training_args,
             train_dataset=tokenized_train,
-            eval_dataset=tokenized_eval,
+            # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
             compute_metrics=compute_metrics,
             callbacks=callbacks,
         )
@@ -784,9 +516,10 @@ if __name__ == "__main__":
         loss_abbrev = "_WL"  # WL for Weighted Loss
     elif args.loss_type == "focal":
         loss_abbrev = f"_FL{args.focal_gamma}"  # FL for Focal Loss with gamma value
+    elif args.loss_type == "sample_weighted":
+        loss_abbrev = "_SWL"  # SWL for Sample Weighted Loss
     
-    save_name = "aya-expanse-8b"
-    model_dir = f"{args.output_dir}/{save_name}_{loss_abbrev}_{sampling_abbrev}"  #_f1_{best_f1:.4f}"
+    model_dir = f"{args.output_dir}/aya-expanse-8b_{sampling_abbrev}{loss_abbrev}_seed{args.seed}"  #_f1_{best_f1:.4f}"
     
     model.save_pretrained(model_dir)
     tokenizer.save_pretrained(os.path.join(model_dir, "tokenizer"))
