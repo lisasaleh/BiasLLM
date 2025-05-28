@@ -1,3 +1,15 @@
+"""Finetune Aya Expanse 8B on teh DGDB dataset. 
+
+Data imbalance in the dataset is handled using data sampling strategies 
+(random oversampling, undersampling, balanced sampling), 
+or using a weighted cross-entropy loss function.
+
+NOTE: The last implementation of the weighted cross-entropy loss 
+was not tested due to time limitations. Previous versions yielded faulty results.
+-> The models were trained using the `ft_aya_lora_simple.py` script, 
+which does not include the weighted loss function but only the data sampling strategies. 
+"""
+
 import os
 import argparse
 import random
