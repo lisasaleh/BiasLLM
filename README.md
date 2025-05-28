@@ -126,7 +126,7 @@ Inside `ft_aya.sh`, these key arguments are passed to `ft_aya_lora_simple.py`:
 |----------------|-----------------------------------------------|---------------------------------------|
 | `--seed`       | Random seed for reproducibility               | `42`                                  |
 | `--sampling`   | Data strategy:                                |`undersample`, `oversample`, `balanced`|
-|                                                                        `normal`, `balanced`            |
+|                |                                               |       `normal`, `balanced`            |
 | `--epochs`     | Number of training epochs                     | `10`                                  |
 | `--bs`         | Batch size per device                         | `4`                                   |
 | `--lora_r`     | LoRA rank                                     | `8`                                   |
