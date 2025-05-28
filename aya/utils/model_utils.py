@@ -1,6 +1,69 @@
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-def classify_answers(text_list):
+train_prompt_template = (
+        "Je bent een expert op het gebied van bias, stereotypering en discriminatie. "
+        "Je taak is om zinnen te classificeren volgens de volgende definitie: een zin bevat bias "
+        "als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat, "
+        "die impliciet of expliciet kunnen zijn, en die gaan over een afgebakende groep personen, "
+        "OF als de zin een woord bevat dat vermeden moet worden vanwege bias. "
+        "Geef de volgende zin een label, antwoord alleen met 'ja' voor biased of 'nee' voor niet-biased. "
+        'De zin is: "{text}" ' 
+    )
+# "Geef de volgende zin een label: 'ja' voor biased of 'nee' voor niet-biased. "
+# "Beantwoord met alleen 'ja' (biased) of 'nee' (niet-biased), zonder uitleg. "
+
+cot_prompt_template = (
+        "Je bent een expert op het gebied van bias, stereotypering en discriminatie. "
+            "Je taak is om zinnen te classificeren volgens de volgende definitie: een zin bevat bias "
+            "als de zin een stereotype, uitsluiting, machtsverhoudingen of vooroordelen bevat, "
+            "die impliciet of expliciet kunnen zijn, en die gaan over een afgebakende groep personen, "
+            "OF als de zin een woord bevat dat vermeden moet worden vanwege bias. "
+            "Denk hardop en stap-voor-stap. " 
+            "Sluit je antwoordt altijd af met het label, 'nee' (niet-biased) of 'ja' (biased). "
+            "Beperk je antwoord tot maximaal 100 tokens. "
+            "De zin is: '{text}'"
+        )
+
+TRAIN_MAX_SEQ_LENGTH = 256  # Maximum input sequence length for training/evaluation
+                            # -> cap on prompt template + sentence length + target length
+
+def preprocess(example, tokenizer):
+    """
+    Preprocess an example for training/evaluation.
+    
+    Converts the numeric label (0/1) to the textual format ("ja"/"nee") that the model will generate,
+    then tokenizes the input and target, and creates the appropriate input_ids, attention_mask, and labels.
+    """
+    # complete the prompt with the example text
+    prompt = train_prompt_template.format(text=example["text"])
+    
+    # convert binary label (0/1) to the text format "ja"/"nee" that the model will generate
+    target = "ja" if example["label"] == 1 else "nee"
+    
+    # tokenize the prompt and target (separately)
+    prompt_tokens = tokenizer(prompt, truncation=True, max_length=TRAIN_MAX_SEQ_LENGTH, add_special_tokens=False)
+    target_tokens = tokenizer(target, truncation=True, max_length=5, add_special_tokens=False)
+    
+    # combine tokenized prompt and target
+    input_ids = prompt_tokens["input_ids"] + target_tokens["input_ids"]
+    attn_mask = prompt_tokens["attention_mask"] + target_tokens["attention_mask"]
+    
+    # for causal LM training, we only want to predict the target tokens, not the prompt tokens
+    # -100 is the ignore index for the loss function 
+    labels = [-100] * len(prompt_tokens["input_ids"]) + target_tokens["input_ids"]
+    
+    # truncate sequences to maximum length
+    input_ids = input_ids[:TRAIN_MAX_SEQ_LENGTH]
+    attn_mask = attn_mask[:TRAIN_MAX_SEQ_LENGTH]
+    labels = labels[:TRAIN_MAX_SEQ_LENGTH]
+    
+    return {
+        "input_ids": input_ids, 
+        "attention_mask": attn_mask, 
+        "labels": labels
+    }
+
+def classify_answers_train(text_list):
     """
     Classify each answer output as:
         1  if the last word is exactly "ja" (case-insensitive),
@@ -41,7 +104,7 @@ def classify_answer_eval(text):
         int: 1 if 'ja' is present, 0 if 'nee' is present, -1 if invalid.
     """
     
-    print(f"Classifying text: '{text}'")
+    # print(f"Classifying text: '{text}'")
     
     # Check if text is empty or not a string -> invalid
     if not text or not isinstance(text, str):
@@ -54,10 +117,10 @@ def classify_answer_eval(text):
     text = ''.join(c for c in text if c.isalnum() or c.isspace())
     
     if 'ja' in text and not 'nee' in text:
-        print("Found 'ja' but not 'nee' -> classified as 1 (biased)")
+        # print("Found 'ja' but not 'nee' -> classified as 1 (biased)")
         return 1
     elif 'nee' in text and not 'ja' in text: 
-        print("Found 'nee' but not 'ja' -> classified as 0 (not biased)")
+        # print("Found 'nee' but not 'ja' -> classified as 0 (not biased)")
         return 0
     else:
         print("Neither 'ja' nor 'nee' found or both found -> classified as -1 (invalid)")
