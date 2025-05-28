@@ -1,3 +1,9 @@
+"""
+Evaluate a finetuned Aya model on the DGDB dataset using a chosen prompt
+(the training prompt, a chain-of-thought variant, or a custom prompt).
+
+NOTE: Deprecated. Use the `eval.py` script instead. Keeping this for reference.
+"""
 import os
 import argparse
 import random
