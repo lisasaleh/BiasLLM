@@ -1,0 +1,7 @@
+accuracy: 0.7992
+f1_macro: 0.7561
+f1_micro: 0.7992
+precision_macro: 0.7479
+recall_macro: 0.7675
+f1_class_0: 0.8587
+f1_class_1: 0.6534

@@ -7,7 +7,11 @@ import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
 import random
 import argparse
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.utils.class_weight import compute_class_weight
+import os
 
 STRAT_ABBREV = {
     "undersample": "us",
@@ -207,13 +211,13 @@ if __name__ == "__main__":
     
     training_args = TrainingArguments(
         output_dir=args.output_dir,
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         learning_rate=args.lr,
         per_device_train_batch_size=args.bs,
         per_device_eval_batch_size=args.bs,
         num_train_epochs=args.epochs,
         weight_decay=args.wd,
-        #save_strategy="epoch",
+        save_strategy="epoch",
         logging_dir="./logs",
         logging_steps=10,
         report_to="none",
@@ -256,8 +260,18 @@ if __name__ == "__main__":
     if args.focal_loss:
         model_dir += "_focal"
     print(f"Model saved to {model_dir}")
-    torch.save(trainer.state_dict(), model_dir + "/model.pt")
+    os.makedirs(model_dir, exist_ok=True)
+    trainer.save_model(model_dir)
     print("Evaluating on test set...")
     test_pred = trainer.predict(tokenized_test)
     test_metrics = compute_metrics_classification(test_pred)
     print("Test metrics:", test_metrics) 
+    with open(model_dir + "/test_metrics.txt", "w") as f:
+        for key, value in test_metrics.items():
+            f.write(f"{key}: {value:.4f}\n")
+    print("Test metrics saved to", model_dir + "/test_metrics.txt")
+    print("Done.")
+    # Save the model
+    model.save_pretrained(model_dir)
+    tokenizer.save_pretrained(model_dir)
+    print(f"Model and tokenizer saved to {model_dir}")
