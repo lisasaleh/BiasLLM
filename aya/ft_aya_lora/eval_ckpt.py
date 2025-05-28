@@ -1,6 +1,7 @@
-"""Evaluate pretrained model on the DGDB dataset.
+"""
+Evaluate a finetuned Aya model on the DGDB dataset.
 
-NOTE: Deprecated. Use the `eval_prompt.py` script instead. Keeping this for reference.
+NOTE: Deprecated. Use the `eval.py` script instead. Keeping this for reference.
 """
 
 import os
