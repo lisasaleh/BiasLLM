@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_mig
 #SBATCH --gpus=1
 #SBATCH --job-name=ftAya
 #SBATCH --ntasks=1
@@ -29,18 +29,18 @@ mkdir -p $RESULTS_DIR
 
 SEED=42
 
-# # Train models with different sampling strategies
-# for sampling in "undersample" "oversample" "balanced" "normal"; do
-#     echo "Training with sampling strategy: $sampling"
-#     python ft_aya_lora_simple.py \
-#         --seed $SEED \
-#         --sampling $sampling \
-#         --epochs 10 \
-#         --bs 4 \
-#         --lora_r 8 \
-#         --lora_alpha 16 \
-#         --output_dir $MODELS_DIR
-# done
+# Finetune models with different data sampling strategies
+for sampling in "undersample" "oversample" "balanced" "normal"; do
+     echo "Training with sampling strategy: $sampling"
+    python ft_aya_lora_simple.py \
+        --seed $SEED \
+        --sampling $sampling \
+        --epochs 10 \
+        --bs 4 \
+        --lora_r 8 \
+        --lora_alpha 16 \
+        --output_dir $MODELS_DIR
+done
 
 # echo "All models trained and saved in $MODELS_DIR"
 
