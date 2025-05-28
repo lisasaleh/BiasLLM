@@ -12,7 +12,7 @@ BiasLLM/
 ├── aya/                         # Aya model implementation
 │   ├── utils/                   # Utility functions for Aya
 │   ├── ft_aya_lora/            # Fine-tuning Aya with LoRA
-│   └── promting/               # Prompt engineering experiments
+│   └── prompting/               # Prompt engineering experiments
 ├── results/                      # Training results and model checkpoints
 │   ├── results_aya/     
 │   ├── results_mt5/                
