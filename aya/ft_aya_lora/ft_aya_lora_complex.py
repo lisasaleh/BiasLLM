@@ -19,7 +19,7 @@ from utils.data_utils import STRAT_ABBREV, sample_data
 from utils.model_utils import preprocess, compute_metrics, TRAIN_MAX_SEQ_LENGTH
 
 # ---------- Constants & Defaults ----------
-TRAIN_MAX_SEQ_LENGTH = TRAIN_MAX_SEQ_LENGTH  # reduce to 256 to save memory
+TRAIN_MAX_SEQ_LENGTH = TRAIN_MAX_SEQ_LENGTH  # 256 by default ()
 DEFAULT_QUANTIZE_4BIT = True
 DEFAULT_FLASH_ATTENTION = True 
 DEFAULT_GRAD_ACC_STEPS = 4  # increased to reduce memory usage
@@ -33,13 +33,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sampling", choices=list(STRAT_ABBREV.keys()), default="normal")
     p.add_argument("--loss_type", type=str, 
-                    choices=["standard", "weighted", "focal", "sample_weighted"], 
+                    choices=["standard", "weighted"], 
                     default="standard", 
-                    help="Loss function type: standard CE, weighted CE, focal loss, or sample-weighted CE")
-    p.add_argument("--focal_gamma", 
-                    type=float, 
-                    default=2.0, 
-                    help="Gamma parameter for focal loss (higher value = more focus on hard examples)")
+                    help="Loss function type: standard CE, weighted CE")
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--bs", type=int, default=4, help="per-device train batch size")
@@ -156,6 +152,7 @@ class WeightedCrossEntropyLoss(nn.Module):
         
         return loss
 
+
 # ---------- Custom Callbacks ----------
 class ClassificationMetricsCallback(TrainerCallback):
     """
@@ -190,10 +187,10 @@ class ClassificationMetricsCallback(TrainerCallback):
         if "eval_accuracy" in metrics:
             metrics["classification_performance"] = f"F1={metrics.get('eval_f1_macro', 0):.4f}, Acc={metrics.get('eval_accuracy', 0):.4f}"
 
+
 class WeightedSFTTrainer(SFTTrainer):
     """
-    Trainer that uses vocabulary-level weighted cross-entropy loss (MT5-style approach).
-    This approach is cleaner and more similar to the MT5 implementation.
+    Trainer that uses vocabulary-level weighted cross-entropy loss.
     """
     def __init__(self, class_weights, tokenizer=None, **kwargs):
         super().__init__(**kwargs)
@@ -222,23 +219,6 @@ class WeightedSFTTrainer(SFTTrainer):
         loss = self.weighted_loss(logits, labels)
         
         return (loss, outputs) if return_outputs else loss
-
-class MetricsLoggerCallback(TrainerCallback):
-    """
-    Custom callback to log classification metrics (accuracy, F1, precision, recall) 
-    instead of token-level accuracy during training.
-    """
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics is None:
-            return
-            
-        print("\n=== Classification Metrics ===")
-        print(f"F1 Score: {metrics.get('eval_f1_macro', 0.0):.4f}")
-        print(f"Accuracy: {metrics.get('eval_accuracy', 0.0):.4f}")
-        print(f"Precision: {metrics.get('eval_precision_macro', 0.0):.4f}")
-        print(f"Recall: {metrics.get('eval_recall_macro', 0.0):.4f}")
-        print(f"Invalid predictions: {metrics.get('eval_invalid_preds_percent', 0.0):.2f}%")
-        print("=============================\n")
 
 
 # -------------- Main --------------
@@ -271,16 +251,16 @@ if __name__ == "__main__":
     print(f"Tokenizer pad token ID: {tokenizer.pad_token_id}")
     
     # Test tokenization of our target tokens
+    ja_tokens = tokenizer("ja", add_special_tokens=False)
+    nee_tokens = tokenizer("nee", add_special_tokens=False)
+    print(f"'ja' tokenizes to: {ja_tokens}")
+    print(f"'nee' tokenizes to: {nee_tokens}")
+    
+    # Ensure 'ja' and 'nee' tokenize to single tokens
     ja_token_ids = tokenizer("ja", add_special_tokens=False).input_ids
     nee_token_ids = tokenizer("nee", add_special_tokens=False).input_ids
-
     assert len(ja_token_ids) == 1, f"'ja' tokenized to multiple tokens: {ja_token_ids}"
     assert len(nee_token_ids) == 1, f"'nee' tokenized to multiple tokens: {nee_token_ids}"
-
-    # ja_tokens = tokenizer("ja", add_special_tokens=False)
-    # nee_tokens = tokenizer("nee", add_special_tokens=False)
-    # print(f"'ja' tokenizes to: {ja_tokens}")
-    # print(f"'nee' tokenizes to: {nee_tokens}")
 
     # ---------- Bits & Bytes Quantization Config ----------
     quantization_config = None
@@ -355,7 +335,6 @@ if __name__ == "__main__":
     print(f"Sampling: {args.sampling} -> {len(sampled_train_df)} samples")
     train_ds = Dataset.from_pandas(sampled_train_df)
     eval_ds = dataset["validation"]
-    # test_ds = dataset["test"]
     
     tokenized_train = train_ds.map(lambda example: preprocess(example, tokenizer), remove_columns=train_ds.column_names, batched=False)
     
@@ -403,7 +382,7 @@ if __name__ == "__main__":
         learning_rate=args.lr,
         weight_decay=args.wd,
         fp16=False,  # use float16 for training
-        bf16=True,  # use bfloat16 for training
+        bf16=False,  # use bfloat16 for training
         warmup_ratio=0.05,
         group_by_length=True,
         lr_scheduler_type="constant",
@@ -414,7 +393,7 @@ if __name__ == "__main__":
     # Create callbacks
     callbacks = [
         ClassificationMetricsCallback(tokenizer=tokenizer, compute_metrics_fn=compute_metrics),
-        MetricsLoggerCallback()
+        # MetricsLoggerCallback()
     ]
     
     # Add early stopping callback if enabled
@@ -426,8 +405,10 @@ if __name__ == "__main__":
             )  # Will monitor "eval_f1_macro" as specified in training_args
         )
     
-    # Compute class weights if using weighted/focal loss
-    if args.loss_type in ["weighted", "focal", "sample_weighted"]:
+    # Compute class weights if using weighted loss
+    if args.loss_type == "weighted":
+        print("Using weighted cross-entropy loss to handle class imbalance")
+        
         # Get train dataset labels
         train_labels = [sample["label"] for sample in dataset["train"]]
         
@@ -438,52 +419,20 @@ if __name__ == "__main__":
             y=train_labels
         )
         
-        if args.loss_type == "weighted":
-            print("Using weighted cross-entropy loss to handle class imbalance")
-            print(f"Computed class weights: {class_weights} [0=not biased, 1=biased]")
-            
-            # Create weighted trainer
-            trainer = WeightedSFTTrainer(
-                class_weights=class_weights,
-                tokenizer=tokenizer,
-                model=model,
-                args=training_args,
-                train_dataset=tokenized_train,
-                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
-                compute_metrics=compute_metrics,
-                callbacks=callbacks,
-            )
-        elif args.loss_type == "sample_weighted":
-            print("Using sample-weighted cross-entropy loss to handle class imbalance")
-            print(f"Computed class weights: {class_weights} [0=not biased, 1=biased]")
-            print("This applies weights at the sample level to avoid punctuation generation issues.")
-            
-            # Create sample-weighted trainer
-            trainer = SampleWeightedSFTTrainer(
-                class_weights=class_weights,
-                model=model,
-                args=training_args,
-                train_dataset=tokenized_train,
-                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
-                compute_metrics=compute_metrics,
-                callbacks=callbacks,
-            )
-        else:  # focal loss
-            print(f"Using focal loss (gamma={args.focal_gamma}) to handle class imbalance and hard examples")
-            print(f"Computed class weights: {class_weights} [0=not biased, 1=biased]")
-            
-            # Create focal loss trainer
-            trainer = FocalSFTTrainer(
-                class_weights=class_weights,
-                gamma=args.focal_gamma,
-                tokenizer=tokenizer,
-                model=model,
-                args=training_args,
-                train_dataset=tokenized_train,
-                # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
-                compute_metrics=compute_metrics,
-                callbacks=callbacks,
-            )
+        print(f"Computed class weights: {class_weights} [0=not biased, 1=biased]")
+        
+        # Create weighted trainer
+        trainer = WeightedSFTTrainer(
+            class_weights=class_weights,
+            tokenizer=tokenizer,
+            model=model,
+            args=training_args,
+            train_dataset=tokenized_train,
+            # eval_dataset=tokenized_eval,  # DISABLED to save memory by not loading eval dataset
+            compute_metrics=compute_metrics,
+            callbacks=callbacks,
+        )
+
     else:
         # Use standard SFT Trainer
         print("Using standard cross-entropy loss")
@@ -514,10 +463,6 @@ if __name__ == "__main__":
     loss_abbrev = ""
     if args.loss_type == "weighted":
         loss_abbrev = "_WL"  # WL for Weighted Loss
-    elif args.loss_type == "focal":
-        loss_abbrev = f"_FL{args.focal_gamma}"  # FL for Focal Loss with gamma value
-    elif args.loss_type == "sample_weighted":
-        loss_abbrev = "_SWL"  # SWL for Sample Weighted Loss
     
     model_dir = f"{args.output_dir}/aya-expanse-8b_{sampling_abbrev}{loss_abbrev}_seed{args.seed}"  #_f1_{best_f1:.4f}"
     
