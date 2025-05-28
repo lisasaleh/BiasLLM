@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_h100
+#SBATCH --partition=gpu_mig
 #SBATCH --gpus=1
-#SBATCH --job-name=ftAya
+#SBATCH --job-name=evalPromptsAya
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=eval_prompt_%A.out
 
 module purge
