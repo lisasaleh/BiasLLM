@@ -1,0 +1,6 @@
+Sampling Strategy,Test Accuracy,F1 (Macro),Precision (Macro),Recall (Macro)
+Undersample,0.7851,0.7432,0.7336,0.7593
+Oversample,0.7979,0.7585,0.7482,0.7754
+No Sampling,0.8132,0.7691,0.7637,0.7756
+Balanced,0.8132,0.7691,0.7637,0.7756
+Weighted Loss,0.8132,0.7691,0.7637,0.7756
